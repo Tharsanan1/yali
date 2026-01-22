@@ -4,11 +4,13 @@ Welcome to the Yali AI Gateway documentation! This documentation covers how to g
 
 ## Table of Contents
 
-1. [Quickstart Guide](quickstart.md) - Get up and running in minutes
-2. [Configuration Guide](configuration.md) - Detailed configuration options
-3. [Protocol Adapters](adapters.md) - Multi-provider support and format translation
-4. [Resilience Features](resilience.md) - Circuit breakers, retries, and health checks
-5. [Load Balancing](load-balancing.md) - Traffic distribution algorithms
+| Document | Description |
+|----------|-------------|
+| [Quickstart Guide](quickstart.md) | Get up and running in 5 minutes |
+| [Configuration Guide](configuration.md) | Complete configuration reference |
+| [Protocol Adapters](adapters.md) | Multi-provider support (OpenAI, Azure, Anthropic, Google AI, Bedrock) |
+| [Resilience Features](resilience.md) | Circuit breakers, retries, and health checks |
+| [Load Balancing](load-balancing.md) | Traffic distribution algorithms (failover, round-robin, weighted) |
 
 ## Overview
 
