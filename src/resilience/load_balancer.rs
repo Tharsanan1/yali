@@ -20,18 +20,24 @@ pub enum LoadBalancerAlgorithm {
     LeastConnections,
 }
 
-impl LoadBalancerAlgorithm {
-    /// Parse algorithm from string.
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for LoadBalancerAlgorithm {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "failover" => Some(LoadBalancerAlgorithm::Failover),
-            "round_robin" | "roundrobin" => Some(LoadBalancerAlgorithm::RoundRobin),
-            "weighted" => Some(LoadBalancerAlgorithm::Weighted),
-            "least_connections" | "leastconnections" => {
-                Some(LoadBalancerAlgorithm::LeastConnections)
-            }
-            _ => None,
+            "failover" => Ok(LoadBalancerAlgorithm::Failover),
+            "round_robin" | "roundrobin" => Ok(LoadBalancerAlgorithm::RoundRobin),
+            "weighted" => Ok(LoadBalancerAlgorithm::Weighted),
+            "least_connections" | "leastconnections" => Ok(LoadBalancerAlgorithm::LeastConnections),
+            _ => Err(format!("Unknown algorithm: {}", s)),
         }
+    }
+}
+
+impl LoadBalancerAlgorithm {
+    /// Parse algorithm from string (convenience method).
+    pub fn parse(s: &str) -> Option<Self> {
+        s.parse().ok()
     }
 }
 
@@ -52,13 +58,16 @@ pub struct LoadBalancer {
     algorithm: LoadBalancerAlgorithm,
     /// Current index for round-robin.
     round_robin_index: AtomicUsize,
-    /// Weighted selection state.
+    /// Weighted selection state (for future smooth weighted round-robin).
+    #[allow(dead_code)]
     weighted_state: RwLock<WeightedState>,
     /// Connection counts per provider.
     connection_counts: RwLock<HashMap<String, AtomicU32>>,
 }
 
-/// State for weighted load balancing.
+/// State for weighted load balancing (for future smooth weighted round-robin).
+#[derive(Default)]
+#[allow(dead_code)]
 struct WeightedState {
     /// Current weights (cumulative).
     cumulative_weights: Vec<(String, u32)>,
@@ -68,17 +77,6 @@ struct WeightedState {
     current_index: usize,
     /// Current weight counter.
     current_weight: u32,
-}
-
-impl Default for WeightedState {
-    fn default() -> Self {
-        Self {
-            cumulative_weights: Vec::new(),
-            total_weight: 0,
-            current_index: 0,
-            current_weight: 0,
-        }
-    }
 }
 
 impl LoadBalancer {
@@ -94,8 +92,7 @@ impl LoadBalancer {
 
     /// Create a load balancer from a string algorithm name.
     pub fn from_algorithm_str(algorithm: &str) -> Self {
-        let algo =
-            LoadBalancerAlgorithm::from_str(algorithm).unwrap_or(LoadBalancerAlgorithm::Failover);
+        let algo = algorithm.parse().unwrap_or(LoadBalancerAlgorithm::Failover);
         Self::new(algo)
     }
 
@@ -246,22 +243,22 @@ mod tests {
     #[test]
     fn test_algorithm_from_str() {
         assert_eq!(
-            LoadBalancerAlgorithm::from_str("failover"),
+            LoadBalancerAlgorithm::parse("failover"),
             Some(LoadBalancerAlgorithm::Failover)
         );
         assert_eq!(
-            LoadBalancerAlgorithm::from_str("round_robin"),
+            LoadBalancerAlgorithm::parse("round_robin"),
             Some(LoadBalancerAlgorithm::RoundRobin)
         );
         assert_eq!(
-            LoadBalancerAlgorithm::from_str("weighted"),
+            LoadBalancerAlgorithm::parse("weighted"),
             Some(LoadBalancerAlgorithm::Weighted)
         );
         assert_eq!(
-            LoadBalancerAlgorithm::from_str("least_connections"),
+            LoadBalancerAlgorithm::parse("least_connections"),
             Some(LoadBalancerAlgorithm::LeastConnections)
         );
-        assert_eq!(LoadBalancerAlgorithm::from_str("invalid"), None);
+        assert_eq!(LoadBalancerAlgorithm::parse("invalid"), None);
     }
 
     #[test]

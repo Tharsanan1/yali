@@ -189,7 +189,7 @@ impl RetryPolicy {
             .any(|condition| match condition {
                 RetryCondition::StatusCode5xx => error
                     .status_code
-                    .map(|c| c >= 500 && c < 600)
+                    .map(|c| (500..600).contains(&c))
                     .unwrap_or(false),
                 RetryCondition::ConnectionFailure => error.is_connection_failure,
                 RetryCondition::Reset => error.is_reset,

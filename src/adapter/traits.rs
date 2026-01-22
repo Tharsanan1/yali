@@ -141,16 +141,19 @@ pub trait ProtocolAdapter: Send + Sync {
 }
 
 /// Helper function to extract a string field from JSON.
+#[allow(dead_code)]
 pub fn extract_string(value: &Value, field: &str) -> Option<String> {
     value.get(field).and_then(|v| v.as_str()).map(String::from)
 }
 
 /// Helper function to extract an array field from JSON.
+#[allow(dead_code)]
 pub fn extract_array<'a>(value: &'a Value, field: &str) -> Option<&'a Vec<Value>> {
     value.get(field).and_then(|v| v.as_array())
 }
 
 /// Helper function to set a field in JSON if not present.
+#[allow(dead_code)]
 pub fn set_default(value: &mut Value, field: &str, default: Value) {
     if let Some(obj) = value.as_object_mut() {
         if !obj.contains_key(field) {

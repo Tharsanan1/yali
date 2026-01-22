@@ -135,11 +135,11 @@ impl HealthChecker {
             state.last_check = Some(Instant::now());
 
             // Check if we should mark as healthy
-            if state.consecutive_successes >= self.config.healthy_threshold {
-                if state.status != HealthStatus::Healthy {
-                    state.status = HealthStatus::Healthy;
-                    state.last_status_change = Some(Instant::now());
-                }
+            if state.consecutive_successes >= self.config.healthy_threshold
+                && state.status != HealthStatus::Healthy
+            {
+                state.status = HealthStatus::Healthy;
+                state.last_status_change = Some(Instant::now());
             }
         }
     }
@@ -154,11 +154,11 @@ impl HealthChecker {
             state.last_check = Some(Instant::now());
 
             // Check if we should mark as unhealthy
-            if state.consecutive_failures >= self.config.unhealthy_threshold {
-                if state.status != HealthStatus::Unhealthy {
-                    state.status = HealthStatus::Unhealthy;
-                    state.last_status_change = Some(Instant::now());
-                }
+            if state.consecutive_failures >= self.config.unhealthy_threshold
+                && state.status != HealthStatus::Unhealthy
+            {
+                state.status = HealthStatus::Unhealthy;
+                state.last_status_change = Some(Instant::now());
             }
         }
     }
