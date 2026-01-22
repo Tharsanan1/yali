@@ -42,6 +42,8 @@
 //! }
 //! ```
 
+pub mod adapter;
 pub mod config;
 pub mod proxy;
+pub mod resilience;
 pub mod state;

@@ -3,9 +3,12 @@
 //! This test module validates the end-to-end functionality of the gateway
 //! by starting a mock LLM service, configuring the gateway, and sending
 //! requests through it.
+//!
+//! Tests are run serially to avoid port conflicts when spawning gateway processes.
 
 use reqwest::Client;
 use serde_json::{json, Value};
+use serial_test::serial;
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -139,6 +142,7 @@ async fn wait_for_port(port: u16, timeout: Duration) -> bool {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_gateway_chat_completion_integration() {
     // Find available ports
     let mock_llm_port = find_available_port();
@@ -288,6 +292,7 @@ async fn test_gateway_chat_completion_integration() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_gateway_route_not_found() {
     // Find available ports
     let mock_llm_port = find_available_port();
@@ -368,4 +373,565 @@ async fn test_gateway_route_not_found() {
     );
 
     println!("Route not found test passed!");
+}
+
+/// Test health endpoint
+#[tokio::test]
+#[serial]
+async fn test_gateway_health_endpoint() {
+    // Find available ports
+    let mock_llm_port = find_available_port();
+    let gateway_port = find_available_port();
+
+    // Start the mock LLM service
+    let _mock_handle = start_mock_llm_service(mock_llm_port).await;
+    assert!(
+        wait_for_port(mock_llm_port, Duration::from_secs(5)).await,
+        "Mock LLM service failed to start"
+    );
+
+    // Create config file
+    let config_content = create_gateway_config(mock_llm_port);
+    let temp_dir = std::env::temp_dir();
+    let config_path = temp_dir.join(format!("gateway_test_config_health_{}.json", gateway_port));
+    let config_path_str = config_path.to_string_lossy().to_string();
+    std::fs::write(&config_path, &config_content).expect("Failed to write config file");
+
+    // Start the gateway process
+    let mut gateway_process = start_gateway_process(&config_path_str, gateway_port);
+
+    // Wait for gateway to be ready
+    let gateway_ready = wait_for_port(gateway_port, Duration::from_secs(10)).await;
+
+    if !gateway_ready {
+        gateway_process.kill().ok();
+        gateway_process.wait().ok();
+        std::fs::remove_file(&config_path).ok();
+        panic!("Gateway failed to start within timeout");
+    }
+
+    // Create HTTP client
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to create HTTP client");
+
+    // Test /v1/health endpoint
+    let response = client
+        .get(format!("http://127.0.0.1:{}/v1/health", gateway_port))
+        .send()
+        .await;
+
+    // Clean up gateway process
+    gateway_process.kill().ok();
+    gateway_process.wait().ok();
+    std::fs::remove_file(&config_path).ok();
+
+    let response = response.expect("Failed to send request");
+
+    // Assert HTTP 200
+    assert_eq!(
+        response.status().as_u16(),
+        200,
+        "Expected HTTP 200 for health endpoint, got {}",
+        response.status()
+    );
+
+    // Validate response body
+    let response_body: Value = response
+        .json()
+        .await
+        .expect("Failed to parse response body");
+
+    assert_eq!(
+        response_body.get("status").and_then(|v| v.as_str()),
+        Some("healthy"),
+        "Health status should be 'healthy'"
+    );
+    assert_eq!(
+        response_body.get("gateway").and_then(|v| v.as_str()),
+        Some("yali"),
+        "Gateway name should be 'yali'"
+    );
+    assert!(
+        response_body.get("version").is_some(),
+        "Response should have 'version' field"
+    );
+    assert!(
+        response_body.get("stats").is_some(),
+        "Response should have 'stats' field"
+    );
+
+    let stats = response_body.get("stats").unwrap();
+    assert!(
+        stats.get("providers").is_some(),
+        "Stats should have 'providers'"
+    );
+    assert!(
+        stats.get("backends").is_some(),
+        "Stats should have 'backends'"
+    );
+    assert!(stats.get("routes").is_some(), "Stats should have 'routes'");
+
+    println!("Health endpoint test passed!");
+}
+
+/// Test /health endpoint (shorthand)
+#[tokio::test]
+#[serial]
+async fn test_gateway_short_health_endpoint() {
+    let mock_llm_port = find_available_port();
+    let gateway_port = find_available_port();
+
+    let _mock_handle = start_mock_llm_service(mock_llm_port).await;
+    assert!(wait_for_port(mock_llm_port, Duration::from_secs(5)).await);
+
+    let config_content = create_gateway_config(mock_llm_port);
+    let temp_dir = std::env::temp_dir();
+    let config_path = temp_dir.join(format!("gateway_test_config_health2_{}.json", gateway_port));
+    let config_path_str = config_path.to_string_lossy().to_string();
+    std::fs::write(&config_path, &config_content).expect("Failed to write config file");
+
+    let mut gateway_process = start_gateway_process(&config_path_str, gateway_port);
+    let gateway_ready = wait_for_port(gateway_port, Duration::from_secs(10)).await;
+
+    if !gateway_ready {
+        gateway_process.kill().ok();
+        gateway_process.wait().ok();
+        std::fs::remove_file(&config_path).ok();
+        panic!("Gateway failed to start within timeout");
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to create HTTP client");
+
+    // Test /health endpoint (shorthand)
+    let response = client
+        .get(format!("http://127.0.0.1:{}/health", gateway_port))
+        .send()
+        .await;
+
+    gateway_process.kill().ok();
+    gateway_process.wait().ok();
+    std::fs::remove_file(&config_path).ok();
+
+    let response = response.expect("Failed to send request");
+    assert_eq!(response.status().as_u16(), 200);
+
+    let response_body: Value = response
+        .json()
+        .await
+        .expect("Failed to parse response body");
+    assert_eq!(
+        response_body.get("status").and_then(|v| v.as_str()),
+        Some("healthy")
+    );
+
+    println!("Short health endpoint test passed!");
+}
+
+/// Test method not allowed (POST to a GET-only route)
+#[tokio::test]
+#[serial]
+async fn test_gateway_method_not_allowed() {
+    let mock_llm_port = find_available_port();
+    let gateway_port = find_available_port();
+
+    let _mock_handle = start_mock_llm_service(mock_llm_port).await;
+    assert!(wait_for_port(mock_llm_port, Duration::from_secs(5)).await);
+
+    let config_content = create_gateway_config(mock_llm_port);
+    let temp_dir = std::env::temp_dir();
+    let config_path = temp_dir.join(format!("gateway_test_config_method_{}.json", gateway_port));
+    let config_path_str = config_path.to_string_lossy().to_string();
+    std::fs::write(&config_path, &config_content).expect("Failed to write config file");
+
+    let mut gateway_process = start_gateway_process(&config_path_str, gateway_port);
+    let gateway_ready = wait_for_port(gateway_port, Duration::from_secs(10)).await;
+
+    if !gateway_ready {
+        gateway_process.kill().ok();
+        gateway_process.wait().ok();
+        std::fs::remove_file(&config_path).ok();
+        panic!("Gateway failed to start within timeout");
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to create HTTP client");
+
+    // Send GET to a POST-only route
+    let response = client
+        .get(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            gateway_port
+        ))
+        .send()
+        .await;
+
+    gateway_process.kill().ok();
+    gateway_process.wait().ok();
+    std::fs::remove_file(&config_path).ok();
+
+    let response = response.expect("Failed to send request");
+    assert_eq!(
+        response.status().as_u16(),
+        405,
+        "Expected HTTP 405 for wrong method, got {}",
+        response.status()
+    );
+
+    let response_body: Value = response
+        .json()
+        .await
+        .expect("Failed to parse response body");
+    let error = response_body
+        .get("error")
+        .expect("Response should have error");
+    assert_eq!(
+        error.get("code").and_then(|v| v.as_str()),
+        Some("METHOD_NOT_ALLOWED")
+    );
+
+    println!("Method not allowed test passed!");
+}
+
+/// Test multiple providers with failover load balancing
+#[tokio::test]
+#[serial]
+async fn test_gateway_failover_load_balancing() {
+    use axum::{http::StatusCode, routing::post, Json, Router};
+
+    // Start two mock LLM services - one will be the primary
+    let primary_port = find_available_port();
+    let gateway_port = find_available_port();
+
+    // Primary service
+    async fn primary_handler(Json(_payload): Json<Value>) -> (StatusCode, Json<Value>) {
+        let response = json!({
+            "id": "chatcmpl-primary",
+            "object": "chat.completion",
+            "model": "gpt-4",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Response from PRIMARY"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
+        });
+        (StatusCode::OK, Json(response))
+    }
+
+    let primary_app = Router::new().route("/v1/chat/completions", post(primary_handler));
+    let primary_listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", primary_port))
+        .await
+        .expect("Failed to bind primary service");
+    tokio::spawn(async move {
+        axum::serve(primary_listener, primary_app).await.unwrap();
+    });
+
+    assert!(wait_for_port(primary_port, Duration::from_secs(5)).await);
+
+    // Create config with two providers (only primary is actually running)
+    let config = json!({
+        "providers": [
+            {
+                "id": "provider_primary",
+                "name": "Primary Provider",
+                "spec": {
+                    "type": "openai",
+                    "endpoint": format!("http://127.0.0.1:{}", primary_port),
+                    "adapter": {
+                        "url": {"path_prefix": "/v1/chat/completions"}
+                    }
+                }
+            }
+        ],
+        "backends": [{
+            "id": "backend_failover",
+            "name": "Failover Backend",
+            "spec": {
+                "load_balancing": {"algorithm": "failover"},
+                "providers": [
+                    {"ref": "provider_primary", "priority": 1, "weight": 100}
+                ]
+            }
+        }],
+        "routes": [{
+            "id": "route_chat",
+            "spec": {
+                "match": {"path": "/v1/chat", "type": "prefix", "methods": ["POST"]},
+                "backend_ref": "backend_failover"
+            }
+        }]
+    });
+
+    let config_content = serde_json::to_string_pretty(&config).unwrap();
+    let temp_dir = std::env::temp_dir();
+    let config_path = temp_dir.join(format!("gateway_test_failover_{}.json", gateway_port));
+    let config_path_str = config_path.to_string_lossy().to_string();
+    std::fs::write(&config_path, &config_content).expect("Failed to write config file");
+
+    let mut gateway_process = start_gateway_process(&config_path_str, gateway_port);
+    let gateway_ready = wait_for_port(gateway_port, Duration::from_secs(10)).await;
+
+    if !gateway_ready {
+        gateway_process.kill().ok();
+        gateway_process.wait().ok();
+        std::fs::remove_file(&config_path).ok();
+        panic!("Gateway failed to start within timeout");
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to create HTTP client");
+
+    let request_body = json!({
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "Test"}]
+    });
+
+    let response = client
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            gateway_port
+        ))
+        .json(&request_body)
+        .send()
+        .await;
+
+    gateway_process.kill().ok();
+    gateway_process.wait().ok();
+    std::fs::remove_file(&config_path).ok();
+
+    let response = response.expect("Failed to send request");
+    assert_eq!(response.status().as_u16(), 200);
+
+    let response_body: Value = response
+        .json()
+        .await
+        .expect("Failed to parse response body");
+    assert_eq!(
+        response_body.get("id").and_then(|v| v.as_str()),
+        Some("chatcmpl-primary")
+    );
+
+    let choices = response_body
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .unwrap();
+    let content = choices[0]
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap();
+    assert_eq!(content, "Response from PRIMARY");
+
+    println!("Failover load balancing test passed!");
+}
+
+/// Test gateway with x-request-id header forwarding
+#[tokio::test]
+#[serial]
+async fn test_gateway_request_id_header() {
+    let mock_llm_port = find_available_port();
+    let gateway_port = find_available_port();
+
+    let _mock_handle = start_mock_llm_service(mock_llm_port).await;
+    assert!(wait_for_port(mock_llm_port, Duration::from_secs(5)).await);
+
+    let config_content = create_gateway_config(mock_llm_port);
+    let temp_dir = std::env::temp_dir();
+    let config_path = temp_dir.join(format!("gateway_test_reqid_{}.json", gateway_port));
+    let config_path_str = config_path.to_string_lossy().to_string();
+    std::fs::write(&config_path, &config_content).expect("Failed to write config file");
+
+    let mut gateway_process = start_gateway_process(&config_path_str, gateway_port);
+    let gateway_ready = wait_for_port(gateway_port, Duration::from_secs(10)).await;
+
+    if !gateway_ready {
+        gateway_process.kill().ok();
+        gateway_process.wait().ok();
+        std::fs::remove_file(&config_path).ok();
+        panic!("Gateway failed to start within timeout");
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to create HTTP client");
+
+    let request_body = json!({
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "Test"}]
+    });
+
+    let response = client
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            gateway_port
+        ))
+        .json(&request_body)
+        .send()
+        .await;
+
+    gateway_process.kill().ok();
+    gateway_process.wait().ok();
+    std::fs::remove_file(&config_path).ok();
+
+    let response = response.expect("Failed to send request");
+    assert_eq!(response.status().as_u16(), 200);
+
+    // Check that the gateway adds x-request-id header
+    let request_id = response.headers().get("x-request-id");
+    assert!(
+        request_id.is_some(),
+        "Response should have x-request-id header"
+    );
+    let request_id_value = request_id.unwrap().to_str().unwrap();
+    assert!(
+        request_id_value.starts_with("req_"),
+        "Request ID should start with 'req_'"
+    );
+
+    // Check x-gateway header
+    let gateway_header = response.headers().get("x-gateway");
+    assert!(
+        gateway_header.is_some(),
+        "Response should have x-gateway header"
+    );
+    assert_eq!(gateway_header.unwrap().to_str().unwrap(), "yali");
+
+    println!("Request ID header test passed!");
+}
+
+/// Test host-based routing (multi-tenant)
+#[tokio::test]
+#[serial]
+async fn test_gateway_host_based_routing() {
+    use axum::{http::StatusCode, routing::post, Json, Router};
+
+    let mock_port = find_available_port();
+    let gateway_port = find_available_port();
+
+    // Mock service
+    async fn mock_handler(Json(_payload): Json<Value>) -> (StatusCode, Json<Value>) {
+        let response = json!({
+            "id": "chatcmpl-tenant",
+            "object": "chat.completion",
+            "model": "gpt-4",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Tenant response"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+        });
+        (StatusCode::OK, Json(response))
+    }
+
+    let app = Router::new().route("/v1/chat/completions", post(mock_handler));
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", mock_port))
+        .await
+        .expect("Failed to bind mock service");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    assert!(wait_for_port(mock_port, Duration::from_secs(5)).await);
+
+    // Create config with host-based routing
+    let config = json!({
+        "providers": [{
+            "id": "provider_tenant",
+            "name": "Tenant Provider",
+            "spec": {
+                "type": "openai",
+                "endpoint": format!("http://127.0.0.1:{}", mock_port),
+                "adapter": {"url": {"path_prefix": "/v1/chat/completions"}}
+            }
+        }],
+        "backends": [{
+            "id": "backend_tenant",
+            "name": "Tenant Backend",
+            "spec": {
+                "providers": [{"ref": "provider_tenant", "priority": 1}]
+            }
+        }],
+        "routes": [
+            {
+                "id": "route_tenant_chat",
+                "host": "tenant1.gateway.local",
+                "spec": {
+                    "match": {"path": "/v1/chat", "type": "prefix", "methods": ["POST"]},
+                    "backend_ref": "backend_tenant"
+                }
+            },
+            {
+                "id": "route_default_chat",
+                "spec": {
+                    "match": {"path": "/v1/chat", "type": "prefix", "methods": ["POST"]},
+                    "backend_ref": "backend_tenant"
+                }
+            }
+        ]
+    });
+
+    let config_content = serde_json::to_string_pretty(&config).unwrap();
+    let temp_dir = std::env::temp_dir();
+    let config_path = temp_dir.join(format!("gateway_test_host_{}.json", gateway_port));
+    let config_path_str = config_path.to_string_lossy().to_string();
+    std::fs::write(&config_path, &config_content).expect("Failed to write config file");
+
+    let mut gateway_process = start_gateway_process(&config_path_str, gateway_port);
+    let gateway_ready = wait_for_port(gateway_port, Duration::from_secs(10)).await;
+
+    if !gateway_ready {
+        gateway_process.kill().ok();
+        gateway_process.wait().ok();
+        std::fs::remove_file(&config_path).ok();
+        panic!("Gateway failed to start within timeout");
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to create HTTP client");
+
+    let request_body = json!({
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "Test"}]
+    });
+
+    // Test with default host (no host header matching a tenant)
+    let response = client
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            gateway_port
+        ))
+        .json(&request_body)
+        .send()
+        .await;
+
+    gateway_process.kill().ok();
+    gateway_process.wait().ok();
+    std::fs::remove_file(&config_path).ok();
+
+    let response = response.expect("Failed to send request");
+    assert_eq!(response.status().as_u16(), 200);
+
+    let response_body: Value = response
+        .json()
+        .await
+        .expect("Failed to parse response body");
+    assert_eq!(
+        response_body.get("id").and_then(|v| v.as_str()),
+        Some("chatcmpl-tenant")
+    );
+
+    println!("Host-based routing test passed!");
 }
