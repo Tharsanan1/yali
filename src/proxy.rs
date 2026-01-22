@@ -60,6 +60,70 @@ impl AIGatewayProxy {
     pub fn new(state: Arc<GatewayState>) -> Self {
         Self { state }
     }
+
+    /// Handle health check requests.
+    async fn handle_health_request(
+        &self,
+        session: &mut Session,
+        ctx: &mut RequestContext,
+    ) -> Result<bool> {
+        use serde_json::json;
+
+        // Collect health information
+        let providers_count = self
+            .state
+            .providers
+            .read()
+            .map(|p| p.len())
+            .unwrap_or(0);
+        let backends_count = self
+            .state
+            .backends
+            .read()
+            .map(|b| b.len())
+            .unwrap_or(0);
+        let routes_count = self
+            .state
+            .routers
+            .read()
+            .map(|r| r.len())
+            .unwrap_or(0)
+            + self
+                .state
+                .default_router
+                .read()
+                .map(|_| 1)
+                .unwrap_or(0);
+
+        let health_response = json!({
+            "status": "healthy",
+            "version": env!("CARGO_PKG_VERSION"),
+            "gateway": "yali",
+            "stats": {
+                "providers": providers_count,
+                "backends": backends_count,
+                "routes": routes_count
+            }
+        });
+
+        let body = serde_json::to_vec(&health_response).unwrap_or_default();
+
+        let mut resp = ResponseHeader::build(200, None)?;
+        resp.insert_header("content-type", "application/json")?;
+        resp.insert_header("x-request-id", &ctx.request_id)?;
+        resp.insert_header("x-gateway", "yali")?;
+        session.write_response_header(Box::new(resp), true).await?;
+        session
+            .write_response_body(Some(Bytes::from(body)), true)
+            .await?;
+
+        info!(
+            request_id = %ctx.request_id,
+            "Health check responded"
+        );
+
+        Ok(true) // Request handled
+    }
 }
 
 #[async_trait]
@@ -83,6 +147,11 @@ impl ProxyHttp for AIGatewayProxy {
         let path = req_header.uri.path();
 
         ctx.original_path = path.to_string();
+
+        // Handle health endpoint
+        if path == "/v1/health" || path == "/health" {
+            return self.handle_health_request(session, ctx).await;
+        }
 
         info!(
             request_id = %ctx.request_id,
