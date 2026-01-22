@@ -21,9 +21,14 @@ fn main() {
     info!("Starting AI-Native Gateway (Yali)");
 
     // Load configuration
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "config.json".to_string());
+    let args: Vec<String> = std::env::args().collect();
+    let config_path = if args.len() > 2 && (args[1] == "--config" || args[1] == "-c") {
+        args[2].clone()
+    } else if args.len() > 1 && !args[1].starts_with('-') {
+        args[1].clone()
+    } else {
+        "config.json".to_string()
+    };
 
     let config = match GatewayConfig::from_file(&config_path) {
         Ok(c) => c,

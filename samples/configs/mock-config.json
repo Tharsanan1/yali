@@ -1,0 +1,51 @@
+{
+  "providers": [
+    {
+      "id": "provider_mock",
+      "name": "Mock AI Provider",
+      "spec": {
+        "type": "openai",
+        "endpoint": "http://127.0.0.1:8000",
+        "adapter": {
+          "auth": {
+            "type": "none"
+          },
+          "url": {
+            "path_prefix": "/v1/chat/completions"
+          }
+        }
+      }
+    }
+  ],
+  "backends": [
+    {
+      "id": "backend_mock",
+      "name": "Mock Backend",
+      "spec": {
+        "load_balancing": {
+          "algorithm": "failover"
+        },
+        "providers": [
+          {
+            "ref": "provider_mock",
+            "priority": 1,
+            "weight": 100
+          }
+        ]
+      }
+    }
+  ],
+  "routes": [
+    {
+      "id": "route_chat",
+      "spec": {
+        "match": {
+          "path": "/v1/chat",
+          "type": "prefix",
+          "methods": ["POST"]
+        },
+        "backend_ref": "backend_mock"
+      }
+    }
+  ]
+}
