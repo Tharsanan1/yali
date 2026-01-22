@@ -1,0 +1,2281 @@
+# Product Requirement Document: AI-Native Gateway (v1)
+
+| Metadata | Details |
+| --- | --- |
+| **Product Name** | AI-Native Gateway Core |
+| **Version** | 1.0.0 |
+| **Status** | Approved for Development |
+| **Core Engine** | Pingora (Rust) |
+| **Architecture** | Granular, Reference-Based, Multi-Tenant |
+| **Last Updated** | 2026-01-22 |
+
+---
+
+## 1. Executive Summary
+
+We are building a high-performance, robust API Gateway specifically optimized for AI workloads. Unlike generic proxies, this system uses a **three-tier resource model** that cleanly separates concerns, treating AI concepts (tokens, prompts, model failovers) as first-class citizens.
+
+**Key Design Decisions:**
+
+* **Engine:** Built on Cloudflare's **Pingora** framework for Rust safety and programmable custom logic.
+* **Config Model:** "Granular & Reference-Based" with three distinct resources:
+  * **Provider** - The actual AI endpoint (OpenAI, Azure, Anthropic)
+  * **Backend** - Orchestration policy (load balancing, circuit breakers, retries)
+  * **Route** - Traffic entry point (path matching, filters)
+* **Conflict Resolution:** Hybrid model using **Subdomains** for tenant isolation and **Longest Prefix Match (Radix Trie)** for route selection.
+* **Resilience:** Native support for protocol adaptation (OpenAI → Azure) allowing seamless failover between incompatible providers.
+
+---
+
+## 2. Core Concepts & Definitions
+
+### 2.1. Resource Hierarchy
+
+```
+┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│     Provider     │     │      Backend     │     │      Route       │
+│  (The Endpoint)  │◄────│  (The Policy)    │◄────│   (The Entry)    │
+├──────────────────┤     ├──────────────────┤     ├──────────────────┤
+│ • endpoint URL   │     │ • load_balancing │     │ • path match     │
+│ • auth adapter   │     │ • circuit_breaker│     │ • filters        │
+│ • headers        │     │ • health_check   │     │ • backend_ref    │
+│ • url_rewrite    │     │ • retry policy   │     └──────────────────┘
+│ • protocol type  │     │ • timeout        │
+└──────────────────┘     │ • provider_refs[]│
+                         └──────────────────┘
+```
+
+### 2.2. Definitions
+
+* **Tenant:** A user or organization isolated by a subdomain (e.g., `org-1.gateway.com`).
+* **Provider:** A single AI endpoint definition with its connection details and protocol adapter (e.g., OpenAI API with bearer auth).
+* **Backend:** An orchestration layer that groups Providers and applies resilience policies (load balancing, circuit breakers, retries).
+* **Route:** A traffic entry point (e.g., `POST /v1/chat`) that applies filters and forwards to a Backend.
+* **Adapter:** Protocol translation logic within a Provider (auth injection, header manipulation, URL rewriting).
+* **Controller:** External management plane that orchestrates multiple Gateway instances, persists configuration, and pushes updates.
+* **Filter:** A processing unit in the request/response pipeline that performs transformations, validations, or enrichments.
+
+---
+
+## 3. System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              CONTROL PLANE                                  │
+│  ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐     │
+│  │   Admin API     │─────▶│   Controller    │─────▶│    Database     │     │
+│  │   (REST/gRPC)   │      │   (Orchestrator)│      │   (PostgreSQL)  │     │
+│  └─────────────────┘      └────────┬────────┘      └─────────────────┘     │
+│                                    │                                        │
+│                          Push Updates (gRPC Stream)                         │
+│                                    │                                        │
+└────────────────────────────────────┼────────────────────────────────────────┘
+                                     │
+         ┌───────────────────────────┼───────────────────────────┐
+         │                           │                           │
+         ▼                           ▼                           ▼
+┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
+│   Gateway #1    │       │   Gateway #2    │       │   Gateway #N    │
+│  ┌───────────┐  │       │  ┌───────────┐  │       │  ┌───────────┐  │
+│  │  Pingora  │  │       │  │  Pingora  │  │       │  │  Pingora  │  │
+│  │  Engine   │  │       │  │  Engine   │  │       │  │  Engine   │  │
+│  ├───────────┤  │       │  ├───────────┤  │       │  ├───────────┤  │
+│  │  Local    │  │       │  │  Local    │  │       │  │  Local    │  │
+│  │ Snapshot  │  │       │  │ Snapshot  │  │       │  │ Snapshot  │  │
+│  └───────────┘  │       │  └───────────┘  │       │  └───────────┘  │
+└─────────────────┘       └─────────────────┘       └─────────────────┘
+      DATA PLANE                DATA PLANE                DATA PLANE
+```
+
+### 3.1. Controller Responsibilities
+- Persist all configuration (Providers, Backends, Routes, Tenants) to database
+- Push configuration updates to all connected gateways via gRPC streaming
+- Validate configuration before persisting (referential integrity, schema validation)
+- Manage tenant provisioning and subdomain allocation
+- Aggregate metrics and health status from gateways
+
+### 3.2. Gateway Responsibilities
+- Execute traffic routing and filtering
+- Maintain local snapshot of configuration for resilience
+- Report health and metrics to controller
+- Handle graceful degradation when controller is unavailable
+
+### 3.3. Configuration Sync Protocol
+
+| Scenario | Behavior |
+|----------|----------|
+| **Normal Startup** | Connect to controller → Fetch full config → Store snapshot → Start serving |
+| **Controller Unavailable on Startup** | Load local snapshot → Start serving (stale config) → Retry controller connection |
+| **Controller Disconnects During Operation** | Continue with cached config → Buffer local changes → Reconnect and sync |
+| **Config Update Received** | Validate → Apply atomically → Update local snapshot → ACK to controller |
+
+**Sync Message Format:**
+```json
+{
+  "version": 1234567890,
+  "type": "full_sync | incremental",
+  "resources": {
+    "providers": [...],
+    "backends": [...],
+    "routes": [...]
+  },
+  "checksum": "sha256:abc123..."
+}
+```
+
+---
+
+## 4. User Workflow
+
+1. **Create Providers:** The user defines individual AI endpoints (e.g., "OpenAI Production", "Azure Fallback") with their authentication and protocol adapters.
+2. **Create Backend:** The user creates an orchestration policy that groups Providers and configures resilience (e.g., "Hybrid Cluster" with failover from OpenAI to Azure).
+3. **Create Route:** The user defines an endpoint (e.g., `POST /v1/chat`) and attaches filters (e.g., PII Masking). They link this Route to the Backend ID.
+4. **Traffic Handling:** The controller validates referential integrity and pushes updates to gateways. Traffic hitting `/v1/chat` is processed through filters, the Backend selects a Provider based on policy, the adapter transforms the request, and it's sent to the AI endpoint.
+
+---
+
+## 5. API Resource Specifications
+
+### 5.1. The Provider Resource
+
+**Endpoint:** `POST /v1/providers`
+**Purpose:** Defines a single AI endpoint with its connection details and protocol adapter.
+
+#### 5.1.1. Provider Schema
+
+```json
+{
+  "id": "provider_openai_prod",
+  "name": "OpenAI Production",
+  "spec": {
+    "type": "openai",
+    "endpoint": "https://api.openai.com",
+    
+    "adapter": {
+      // Authentication
+      "auth": { 
+        "type": "bearer", 
+        "secret_ref": "vault://openai-key" 
+      },
+
+      // Header transformations
+      "headers": {
+        "add": { "OpenAI-Organization": "org-main" },
+        "remove": []
+      },
+
+      // URL transformations
+      "url": {
+        "path_prefix": "/v1",
+        "path_template": null,
+        "query_params": {}
+      },
+
+      // Body transformations (request)
+      "request_body": {
+        "format": "openai_chat",  // canonical format this provider expects
+        "field_mappings": {},     // custom field name mappings
+        "defaults": {},           // default values to inject
+        "remove_fields": []       // fields to strip before sending
+      },
+
+      // Body transformations (response)
+      "response_body": {
+        "format": "openai_chat",  // format of provider's response
+        "field_mappings": {}      // map back to canonical format
+      }
+    },
+
+    "connection_pool": {
+      "max_size": 100,
+      "min_idle": 10,
+      "max_idle_timeout": "300s"
+    }
+  }
+}
+```
+
+#### 5.1.2. Adapter Transformation Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         REQUEST TRANSFORMATION                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Incoming       ┌──────────┐   ┌──────────┐   ┌──────────┐   Outgoing      │
+│  Request   ───► │   Auth   │──►│  Headers │──►│   URL    │──►  Request     │
+│  (Client)       │ Injection│   │ Transform│   │ Rewrite  │   (to Provider) │
+│                 └──────────┘   └──────────┘   └──────────┘                 │
+│                                      │                                      │
+│                                      ▼                                      │
+│                              ┌──────────────┐                               │
+│                              │     Body     │                               │
+│                              │ Transformation│                              │
+│                              │  (Request)   │                               │
+│                              └──────────────┘                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         RESPONSE TRANSFORMATION                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Provider       ┌──────────────┐   ┌──────────┐   Client                   │
+│  Response  ───► │     Body     │──►│  Headers │──►  Response               │
+│                 │ Transformation│   │ Transform│                            │
+│                 │  (Response)  │   │          │                            │
+│                 └──────────────┘   └──────────┘                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 5.1.3. Body Transformation Formats
+
+The gateway uses a **canonical format** (OpenAI-compatible) as the internal representation. Adapters transform to/from provider-specific formats.
+
+**Canonical Request Format (OpenAI-compatible):**
+```json
+{
+  "model": "gpt-4",
+  "messages": [
+    { "role": "system", "content": "..." },
+    { "role": "user", "content": "..." }
+  ],
+  "temperature": 0.7,
+  "top_p": 1.0,
+  "max_tokens": 1000,
+  "stream": true,
+  "stop": ["END"],
+  "presence_penalty": 0,
+  "frequency_penalty": 0
+}
+```
+
+**Provider Format Mappings:**
+
+| Canonical Field | OpenAI | Anthropic | Google AI | AWS Bedrock (Claude) |
+|----------------|--------|-----------|-----------|---------------------|
+| `model` | `model` | `model` | `model` | (in URL path) |
+| `messages` | `messages` | `messages` | `contents` | `messages` |
+| `messages[].role` | `role` | `role` | `role` | `role` |
+| `messages[].content` | `content` | `content` | `parts[].text` | `content` |
+| `temperature` | `temperature` | `temperature` | `generationConfig.temperature` | `temperature` |
+| `top_p` | `top_p` | `top_p` | `generationConfig.topP` | `top_p` |
+| `max_tokens` | `max_tokens` | `max_tokens` | `generationConfig.maxOutputTokens` | `max_tokens` |
+| `stream` | `stream` | `stream` | (SSE endpoint) | (invoke-with-response-stream) |
+| `stop` | `stop` | `stop_sequences` | `generationConfig.stopSequences` | `stop_sequences` |
+
+#### 5.1.4. Provider Examples
+
+**OpenAI Provider (Minimal - uses defaults):**
+```json
+{
+  "id": "provider_openai_prod",
+  "name": "OpenAI Production",
+  "spec": {
+    "type": "openai",
+    "endpoint": "https://api.openai.com",
+    "adapter": {
+      "auth": { "type": "bearer", "secret_ref": "vault://openai-key" },
+      "headers": {
+        "add": { "OpenAI-Organization": "org-main" }
+      }
+    }
+  }
+}
+```
+
+**Anthropic Provider:**
+```json
+{
+  "id": "provider_anthropic",
+  "name": "Anthropic Claude",
+  "spec": {
+    "type": "anthropic",
+    "endpoint": "https://api.anthropic.com",
+    "adapter": {
+      "auth": { "type": "header", "key": "x-api-key", "secret_ref": "vault://anthropic-key" },
+      "headers": {
+        "add": { "anthropic-version": "2023-06-01" }
+      },
+      "url": {
+        "path_prefix": "/v1/messages"
+      },
+      "request_body": {
+        "format": "anthropic",
+        "field_mappings": {
+          "max_tokens": "max_tokens",
+          "stop": "stop_sequences"
+        },
+        "transforms": [
+          {
+            "type": "extract_system_message",
+            "description": "Anthropic requires system as top-level field"
+          }
+        ]
+      },
+      "response_body": {
+        "format": "anthropic",
+        "field_mappings": {
+          "content[0].text": "choices[0].message.content",
+          "stop_reason": "choices[0].finish_reason"
+        }
+      }
+    }
+  }
+}
+```
+
+**Google AI (Gemini) Provider:**
+```json
+{
+  "id": "provider_google_gemini",
+  "name": "Google Gemini Pro",
+  "spec": {
+    "type": "google_ai",
+    "endpoint": "https://generativelanguage.googleapis.com",
+    "adapter": {
+      "auth": { "type": "query_param", "key": "key", "secret_ref": "vault://google-ai-key" },
+      "url": {
+        "path_template": "/v1beta/models/{model}:generateContent"
+      },
+      "request_body": {
+        "format": "google_ai",
+        "field_mappings": {
+          "messages": "contents",
+          "messages[].content": "contents[].parts[].text",
+          "temperature": "generationConfig.temperature",
+          "top_p": "generationConfig.topP",
+          "max_tokens": "generationConfig.maxOutputTokens",
+          "stop": "generationConfig.stopSequences"
+        },
+        "transforms": [
+          {
+            "type": "role_mapping",
+            "mappings": { "assistant": "model" }
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+**Azure OpenAI Provider:**
+```json
+{
+  "id": "provider_azure_fallback",
+  "name": "Azure OpenAI Fallback",
+  "spec": {
+    "type": "azure_openai",
+    "endpoint": "https://east-us.api.cognitive.microsoft.com",
+    "adapter": {
+      "auth": { "type": "header", "key": "api-key", "secret_ref": "vault://azure-key" },
+      "headers": {
+        "remove": ["Authorization"]
+      },
+      "url": {
+        "path_template": "/openai/deployments/{deployment}/chat/completions",
+        "query_params": { "api-version": "2023-05-15" }
+      },
+      "request_body": {
+        "format": "openai_chat",
+        "remove_fields": ["model"],
+        "defaults": {}
+      }
+    }
+  }
+}
+```
+
+**AWS Bedrock Provider:**
+```json
+{
+  "id": "provider_bedrock_claude",
+  "name": "AWS Bedrock Claude",
+  "spec": {
+    "type": "bedrock",
+    "endpoint": "https://bedrock-runtime.us-east-1.amazonaws.com",
+    "adapter": {
+      "auth": { 
+        "type": "aws_sigv4", 
+        "region": "us-east-1", 
+        "service": "bedrock",
+        "credentials_ref": "vault://aws-credentials"
+      },
+      "url": {
+        "path_template": "/model/{model}/invoke"
+      },
+      "request_body": {
+        "format": "bedrock_claude",
+        "field_mappings": {
+          "stop": "stop_sequences"
+        },
+        "remove_fields": ["model"],
+        "transforms": [
+          {
+            "type": "wrap",
+            "wrapper_field": "anthropic_version",
+            "value": "bedrock-2023-05-31"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+**Custom/Self-Hosted Provider:**
+```json
+{
+  "id": "provider_vllm_local",
+  "name": "Self-hosted vLLM",
+  "spec": {
+    "type": "custom",
+    "endpoint": "http://vllm.internal:8000",
+    "adapter": {
+      "auth": { "type": "header", "key": "X-API-Key", "secret_ref": "env://VLLM_API_KEY" },
+      "url": {
+        "path_prefix": "/v1/chat/completions"
+      },
+      "request_body": {
+        "format": "openai_chat",
+        "defaults": {
+          "model": "meta-llama/Llama-2-70b-chat-hf"
+        }
+      }
+    }
+  }
+}
+```
+
+#### 5.1.5. Transform Types
+
+| Transform Type | Description | Example |
+|---------------|-------------|---------|
+| `field_mappings` | Rename fields | `"max_tokens"` → `"maxOutputTokens"` |
+| `extract_system_message` | Move system message to top-level | For Anthropic API |
+| `role_mapping` | Rename role values | `"assistant"` → `"model"` |
+| `wrap` | Wrap body in container | Add metadata fields |
+| `flatten` | Flatten nested structures | `generationConfig.temp` → `temperature` |
+| `remove_fields` | Remove fields from body | Strip `model` for Azure |
+| `defaults` | Inject default values | Set default `temperature` |
+| `template` | Apply JSONPath template | Complex restructuring |
+
+**Provider Types:**
+
+| Type | Endpoint Pattern | Default Auth |
+|------|------------------|--------------|
+| `openai` | `api.openai.com` | Bearer token |
+| `azure_openai` | `*.api.cognitive.microsoft.com` | `api-key` header |
+| `anthropic` | `api.anthropic.com` | `x-api-key` header |
+| `google_ai` | `generativelanguage.googleapis.com` | Bearer token |
+| `cohere` | `api.cohere.ai` | Bearer token |
+| `bedrock` | `bedrock-runtime.*.amazonaws.com` | AWS SigV4 |
+| `custom` | Any URL | Configurable |
+
+### 5.2. The Backend Resource
+
+**Endpoint:** `POST /v1/backends`
+**Purpose:** Groups Providers and applies orchestration policies (load balancing, resilience, health checks).
+
+```json
+{
+  "id": "backend_hybrid_prod",
+  "name": "Hybrid Production Cluster",
+  "spec": {
+    "load_balancing": {
+      "algorithm": "failover",
+      "sticky_sessions": false
+    },
+
+    "providers": [
+      { 
+        "ref": "provider_openai_prod", 
+        "priority": 1, 
+        "weight": 100 
+      },
+      { 
+        "ref": "provider_azure_fallback", 
+        "priority": 2, 
+        "weight": 0 
+      }
+    ],
+
+    "timeout": {
+      "connect": "2s",
+      "response": "600s",
+      "idle": "60s"
+    },
+
+    "retry": {
+      "attempts": 3,
+      "backoff": {
+        "initial": "100ms",
+        "max": "10s",
+        "multiplier": 2
+      },
+      "conditions": ["5xx", "connect-failure", "reset"]
+    },
+
+    "circuit_breaker": {
+      "enabled": true,
+      "error_threshold_percentage": 50,
+      "min_request_volume": 20,
+      "sleep_window": "30s",
+      "half_open_requests": 5
+    },
+
+    "health_check": {
+      "type": "active",
+      "interval": "10s",
+      "timeout": "5s",
+      "path": "/health",
+      "healthy_threshold": 2,
+      "unhealthy_threshold": 3,
+      "expected_statuses": [200, 204]
+    }
+  }
+}
+```
+
+**Supported Load Balancing Algorithms:**
+
+| Algorithm | Behavior | Use Case |
+|-----------|----------|----------|
+| `failover` | Uses highest priority provider; falls back on failure | Primary/backup setups |
+| `round_robin` | Distributes evenly across healthy providers | Even load distribution |
+| `weighted` | Distributes based on weight values | Gradual rollouts, A/B testing |
+| `least_connections` | Routes to provider with fewest active connections | Variable latency providers |
+
+### 5.3. The Route Resource
+
+**Endpoint:** `POST /v1/routes`
+**Purpose:** Defines the entry point, matching logic, and policy filters.
+
+```json
+{
+  "id": "route_chat_v1",
+  "host": "org-1.gateway.com",
+  "spec": {
+    "match": {
+      "path": "/v1/chat",
+      "type": "prefix",
+      "methods": ["POST"]
+    },
+
+    "filters": [
+      { 
+        "name": "auth_jwt", 
+        "config": { "issuer": "clerk" },
+        "on_error": "terminate"
+      },
+      { 
+        "name": "pii_masking", 
+        "config": { "types": ["ssn", "email", "credit_card"] },
+        "on_error": "log_and_continue"
+      },
+      { 
+        "name": "rate_limit", 
+        "config": { 
+          "limits": [
+            { "limit": 100, "window": "1m", "key": "request", "scope": "api_key" },
+            { "limit": 50000, "window": "1m", "key": "token", "scope": "api_key" }
+          ]
+        },
+        "on_error": "terminate"
+      }
+    ],
+
+    "backend_ref": "backend_hybrid_prod"
+  }
+}
+```
+
+---
+
+## 5.4. Filter System Architecture
+
+The filter system is designed for extensibility, supporting authentication, rate limiting, transformations, and AI-specific use cases.
+
+### 5.4.1. Filter Execution Phases
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                            REQUEST FLOW                                              │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  Client      ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐     Provider    │
+│  Request ──► │ PRE_    │──►│ PRE_    │──►│ Adapter │──►│ POST_   │──►  Request     │
+│              │ ROUTE   │   │ BACKEND │   │ (Body)  │   │ ADAPTER │                  │
+│              └─────────┘   └─────────┘   └─────────┘   └─────────┘                  │
+│                  │              │                            │                       │
+│              Auth, Rate    Transform,                   Final                        │
+│              Limit, Early  Enrich                       Headers                      │
+│              Reject                                                                  │
+│                                                                                      │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                            RESPONSE FLOW                                             │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  Provider    ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐     Client      │
+│  Response ──►│ PRE_    │──►│ Adapter │──►│ POST_   │──►│ POST_   │──►  Response    │
+│              │ ADAPTER │   │ (Body)  │   │ BACKEND │   │ ROUTE   │                  │
+│              └─────────┘   └─────────┘   └─────────┘   └─────────┘                  │
+│                                               │              │                       │
+│                                          Transform,     Logging,                     │
+│                                          Token Count    Metrics                      │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+| Phase | When | Use Cases |
+|-------|------|-----------|
+| `PRE_ROUTE` | Before route matching | Global auth, IP blocking, early rate limiting |
+| `PRE_BACKEND` | After route match, before provider selection | Request transformation, enrichment, logging |
+| `POST_ADAPTER` | After adapter transforms, before sending | Final header injection, request signing |
+| `PRE_ADAPTER` | After provider response, before adapter | Raw response logging |
+| `POST_BACKEND` | After adapter normalizes response | Token counting, cost calculation |
+| `POST_ROUTE` | Before returning to client | Response transformation, final logging |
+
+### 5.4.2. Filter Categories
+
+#### **Authentication Filters**
+
+| Filter | Description | Config Example |
+|--------|-------------|----------------|
+| `auth_jwt` | Validate JWT tokens | `{ "issuer": "clerk", "audience": "api", "jwks_uri": "..." }` |
+| `auth_api_key` | Validate API keys | `{ "header": "X-API-Key", "store": "redis://...", "hash": "sha256" }` |
+| `auth_oauth2` | OAuth2 token introspection | `{ "introspection_url": "...", "client_id": "..." }` |
+| `auth_mtls` | Mutual TLS client cert | `{ "ca_cert": "...", "verify_depth": 2 }` |
+| `auth_basic` | HTTP Basic auth | `{ "realm": "api", "users_ref": "vault://users" }` |
+
+```json
+{
+  "name": "auth_api_key",
+  "phase": "PRE_ROUTE",
+  "config": {
+    "header": "X-API-Key",
+    "query_param": "api_key",
+    "store": {
+      "type": "redis",
+      "url": "redis://localhost:6379",
+      "prefix": "apikeys:"
+    },
+    "extract_metadata": ["tenant_id", "tier", "rate_limit_tier"]
+  }
+}
+```
+
+#### **Rate Limiting Filters**
+
+| Filter | Description | Config Example |
+|--------|-------------|----------------|
+| `rate_limit` | Multi-dimensional rate limiting | See below |
+| `concurrent_limit` | Limit concurrent requests | `{ "max": 10, "scope": "api_key" }` |
+| `quota` | Usage quotas (daily/monthly) | `{ "limit": 1000000, "period": "month", "key": "token" }` |
+
+```json
+{
+  "name": "rate_limit",
+  "phase": "PRE_ROUTE",
+  "config": {
+    "store": {
+      "type": "redis",
+      "url": "redis://localhost:6379",
+      "key_prefix": "ratelimit:"
+    },
+    "limits": [
+      {
+        "name": "requests_per_minute",
+        "limit": 60,
+        "window": "1m",
+        "algorithm": "sliding_window",
+        "key": "request",
+        "scope": "api_key",
+        "burst": 10
+      },
+      {
+        "name": "tokens_per_minute", 
+        "limit": 100000,
+        "window": "1m",
+        "algorithm": "token_bucket",
+        "key": "token",
+        "scope": "api_key",
+        "token_counter": "estimated"
+      },
+      {
+        "name": "tokens_per_day",
+        "limit": 1000000,
+        "window": "24h",
+        "algorithm": "fixed_window",
+        "key": "token",
+        "scope": "tenant"
+      }
+    ],
+    "response_headers": {
+      "include": true,
+      "prefix": "X-RateLimit-"
+    }
+  }
+}
+```
+
+**Rate Limiting Algorithms:**
+
+| Algorithm | Description | Use Case |
+|-----------|-------------|----------|
+| `fixed_window` | Reset counter at window boundary | Simple, predictable |
+| `sliding_window` | Rolling window calculation | Smoother limiting |
+| `token_bucket` | Tokens refill over time, allows bursts | Best for APIs |
+| `leaky_bucket` | Constant drain rate | Smooth traffic shaping |
+
+**Rate Limit Keys:**
+
+| Key | Description | Extracted From |
+|-----|-------------|----------------|
+| `request` | Count requests | N/A |
+| `token` | Count tokens | Request body or response |
+| `byte` | Count bytes | Request/response size |
+| `cost` | Estimated cost | Model + tokens |
+
+**Rate Limit Scopes:**
+
+| Scope | Description | Identifier Source |
+|-------|-------------|-------------------|
+| `global` | Across all requests | N/A |
+| `tenant` | Per tenant | Subdomain or JWT claim |
+| `api_key` | Per API key | Auth filter metadata |
+| `user` | Per user | JWT `sub` claim |
+| `ip` | Per IP address | `X-Forwarded-For` or connection |
+| `route` | Per route | Route ID |
+| `custom` | Custom expression | JSONPath expression |
+
+#### **Transformation Filters**
+
+| Filter | Description | Config Example |
+|--------|-------------|----------------|
+| `transform_headers` | Modify request/response headers | See below |
+| `transform_body` | Modify request/response body | See below |
+| `transform_url` | Modify request URL/path | `{ "strip_prefix": "/v1", "add_prefix": "/api" }` |
+
+```json
+{
+  "name": "transform_headers",
+  "phase": "PRE_BACKEND",
+  "config": {
+    "request": {
+      "add": {
+        "X-Tenant-ID": "${ctx.tenant_id}",
+        "X-Request-ID": "${ctx.request_id}",
+        "X-Forwarded-Proto": "https"
+      },
+      "remove": ["X-Internal-Header"],
+      "rename": {
+        "Authorization": "X-Original-Auth"
+      },
+      "set_if_empty": {
+        "Accept": "application/json"
+      }
+    },
+    "response": {
+      "add": {
+        "X-Gateway-Version": "1.0.0"
+      },
+      "remove": ["Server", "X-Powered-By"],
+      "expose": ["X-Request-ID", "X-RateLimit-*"]
+    }
+  }
+}
+```
+
+```json
+{
+  "name": "transform_body",
+  "phase": "PRE_BACKEND",
+  "config": {
+    "request": {
+      "set": {
+        "metadata.gateway": "ai-gateway",
+        "metadata.timestamp": "${now_iso}"
+      },
+      "remove": ["internal_field"],
+      "rename": {
+        "old_field": "new_field"
+      },
+      "defaults": {
+        "temperature": 0.7,
+        "max_tokens": 1000
+      },
+      "template": null
+    },
+    "response": {
+      "set": {
+        "gateway_processed": true
+      }
+    }
+  }
+}
+```
+
+#### **AI-Specific Filters**
+
+| Filter | Description | Config Example |
+|--------|-------------|----------------|
+| `token_counter` | Count/estimate tokens | `{ "method": "tiktoken", "model": "gpt-4" }` |
+| `pii_masking` | Mask PII in prompts/responses | `{ "types": ["ssn", "email"], "action": "mask" }` |
+| `prompt_injection` | Detect prompt injection attacks | `{ "model": "classifier-v1", "threshold": 0.8 }` |
+| `content_filter` | Filter harmful content | `{ "categories": ["hate", "violence"], "action": "block" }` |
+| `semantic_cache` | Cache semantically similar requests | `{ "similarity_threshold": 0.95, "ttl": "1h" }` |
+| `cost_tracker` | Track and limit costs | `{ "budget": 100, "period": "day", "scope": "tenant" }` |
+| `model_router` | Route based on prompt characteristics | `{ "rules": [...] }` |
+| `fallback_response` | Return fallback on provider failure | `{ "response": {...}, "conditions": ["5xx"] }` |
+
+```json
+{
+  "name": "token_counter",
+  "phase": "POST_BACKEND",
+  "config": {
+    "method": "tiktoken",
+    "model_field": "model",
+    "model_mapping": {
+      "gpt-4": "cl100k_base",
+      "gpt-3.5-turbo": "cl100k_base",
+      "claude-3": "anthropic"
+    },
+    "count_request": true,
+    "count_response": true,
+    "store_in_context": true,
+    "emit_metrics": true
+  }
+}
+```
+
+```json
+{
+  "name": "semantic_cache",
+  "phase": "PRE_BACKEND",
+  "config": {
+    "enabled": true,
+    "embedding_provider": "provider_openai_embeddings",
+    "vector_store": {
+      "type": "redis",
+      "url": "redis://localhost:6379",
+      "index": "semantic_cache"
+    },
+    "similarity_threshold": 0.95,
+    "ttl": "1h",
+    "cache_key_fields": ["model", "messages"],
+    "exclude_fields": ["stream", "user"],
+    "max_tokens_to_cache": 4000
+  }
+}
+```
+
+```json
+{
+  "name": "prompt_injection",
+  "phase": "PRE_BACKEND",
+  "config": {
+    "enabled": true,
+    "detection_methods": [
+      {
+        "type": "pattern",
+        "patterns": ["ignore previous", "disregard above", "new instructions"]
+      },
+      {
+        "type": "classifier",
+        "model": "prompt-injection-classifier-v1",
+        "threshold": 0.8
+      }
+    ],
+    "action": "block",
+    "log_detections": true
+  }
+}
+```
+
+```json
+{
+  "name": "model_router",
+  "phase": "PRE_BACKEND",
+  "config": {
+    "rules": [
+      {
+        "condition": { "estimated_tokens": { "gt": 8000 } },
+        "backend_override": "backend_large_context"
+      },
+      {
+        "condition": { "messages[0].content": { "contains": "code" } },
+        "backend_override": "backend_code_specialized"
+      },
+      {
+        "condition": { "priority": "low" },
+        "backend_override": "backend_cost_optimized"
+      }
+    ],
+    "default": null
+  }
+}
+```
+
+#### **Observability Filters**
+
+| Filter | Description | Config Example |
+|--------|-------------|----------------|
+| `request_logger` | Log request/response details | `{ "level": "info", "include_body": false }` |
+| `metrics` | Emit custom metrics | `{ "name": "custom_counter", "labels": [...] }` |
+| `trace_enricher` | Add custom trace attributes | `{ "attributes": {...} }` |
+
+### 5.4.3. Filter Configuration Schema
+
+```json
+{
+  "name": "filter_name",
+  "phase": "PRE_ROUTE | PRE_BACKEND | POST_ADAPTER | PRE_ADAPTER | POST_BACKEND | POST_ROUTE",
+  "enabled": true,
+  "condition": {
+    "expression": "${ctx.tenant_tier} == 'enterprise'"
+  },
+  "config": { },
+  "on_error": "terminate | log_and_continue | skip",
+  "timeout": "5s",
+  "async": false
+}
+```
+
+### 5.4.4. Filter Context & Variables
+
+Filters can access and modify a shared context:
+
+```json
+{
+  "ctx": {
+    "request_id": "req_abc123",
+    "tenant_id": "org-1",
+    "route_id": "route_chat_v1",
+    "backend_id": "backend_hybrid_prod",
+    "provider_id": null,
+    
+    "auth": {
+      "authenticated": true,
+      "method": "api_key",
+      "api_key_id": "key_xyz",
+      "user_id": "user_123",
+      "claims": { },
+      "metadata": { "tier": "enterprise" }
+    },
+    
+    "rate_limit": {
+      "remaining": { "requests": 55, "tokens": 45000 },
+      "reset_at": "2026-01-22T10:31:00Z"
+    },
+    
+    "tokens": {
+      "input_estimated": 150,
+      "input_actual": null,
+      "output_actual": null
+    },
+    
+    "timing": {
+      "started_at": "2026-01-22T10:30:00Z",
+      "filter_durations": { }
+    },
+    
+    "custom": { }
+  }
+}
+```
+
+**Variable Interpolation:**
+- `${ctx.tenant_id}` - Access context values
+- `${req.header.Authorization}` - Request header
+- `${req.body.model}` - Request body field (JSONPath)
+- `${res.header.X-Request-ID}` - Response header
+- `${res.body.usage.total_tokens}` - Response body field
+- `${now_iso}` - Current ISO timestamp
+- `${uuid}` - Generate UUID
+
+### 5.4.5. Distributed State Management
+
+For rate limiting and caching to work across gateway instances:
+
+```json
+{
+  "state_store": {
+    "type": "redis",
+    "url": "redis://localhost:6379",
+    "cluster_mode": false,
+    "connection_pool": {
+      "max_size": 50,
+      "min_idle": 10
+    },
+    "namespaces": {
+      "rate_limit": { "prefix": "rl:", "ttl": "5m" },
+      "api_keys": { "prefix": "keys:", "ttl": "1h" },
+      "cache": { "prefix": "cache:", "ttl": "24h" },
+      "sessions": { "prefix": "sess:", "ttl": "30m" }
+    }
+  }
+}
+```
+
+### 5.4.6. Global Filters vs Route Filters
+
+Filters can be defined globally (apply to all routes) or per-route:
+
+```json
+{
+  "global_filters": [
+    {
+      "name": "auth_api_key",
+      "phase": "PRE_ROUTE",
+      "config": { ... }
+    },
+    {
+      "name": "rate_limit",
+      "phase": "PRE_ROUTE", 
+      "config": { ... }
+    },
+    {
+      "name": "request_logger",
+      "phase": "POST_ROUTE",
+      "config": { ... }
+    }
+  ]
+}
+```
+
+**Filter Ordering:** Global PRE_* → Route PRE_* → [Request] → Route POST_* → Global POST_*
+
+### 5.5. Full API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/v1/providers` | Create new provider |
+| `GET` | `/v1/providers` | List all providers (paginated) |
+| `GET` | `/v1/providers/{id}` | Get provider by ID |
+| `PUT` | `/v1/providers/{id}` | Full update of provider |
+| `PATCH` | `/v1/providers/{id}` | Partial update of provider |
+| `DELETE` | `/v1/providers/{id}` | Delete provider (if not referenced) |
+| `POST` | `/v1/backends` | Create new backend |
+| `GET` | `/v1/backends` | List all backends (paginated) |
+| `GET` | `/v1/backends/{id}` | Get backend by ID |
+| `PUT` | `/v1/backends/{id}` | Full update of backend |
+| `PATCH` | `/v1/backends/{id}` | Partial update of backend |
+| `DELETE` | `/v1/backends/{id}` | Delete backend (if not referenced) |
+| `POST` | `/v1/routes` | Create new route |
+| `GET` | `/v1/routes` | List all routes (paginated) |
+| `GET` | `/v1/routes/{id}` | Get route by ID |
+| `PUT` | `/v1/routes/{id}` | Full update of route |
+| `PATCH` | `/v1/routes/{id}` | Partial update of route |
+| `DELETE` | `/v1/routes/{id}` | Delete route |
+| `GET` | `/v1/global-filters` | Get global filter configuration |
+| `PUT` | `/v1/global-filters` | Update global filters |
+| `GET` | `/v1/filters/schemas` | List available filter types and schemas |
+| `GET` | `/v1/filters/schemas/{name}` | Get schema for specific filter |
+| `POST` | `/v1/api-keys` | Create new API key |
+| `GET` | `/v1/api-keys` | List API keys (paginated) |
+| `GET` | `/v1/api-keys/{id}` | Get API key by ID |
+| `DELETE` | `/v1/api-keys/{id}` | Revoke API key |
+| `POST` | `/v1/api-keys/{id}/rotate` | Rotate API key |
+| `GET` | `/v1/usage` | Get usage statistics |
+| `GET` | `/v1/usage/{tenant_id}` | Get tenant usage |
+| `GET` | `/v1/health` | Gateway health status |
+| `GET` | `/v1/metrics` | Prometheus metrics endpoint |
+
+**Pagination Parameters:**
+- `?page=1&per_page=50` - Page-based pagination
+- `?cursor=abc123&limit=50` - Cursor-based pagination (recommended for large datasets)
+
+---
+
+## 6. Functional Requirements
+
+### 6.1. Control Plane (Controller)
+
+* **Validation:**
+  * MUST verify that `backend_ref` in Route exists before creating.
+  * MUST verify that all `provider_refs` in Backend exist before creating.
+  * MUST verify `host` ownership (DNS TXT record check) for new domains.
+  * MUST validate JSON schema for all resource configurations.
+  * MUST validate filter configurations against registered schemas.
+
+* **Referential Integrity:**
+  * MUST prevent deletion of a Provider if any Backends reference it.
+  * MUST prevent deletion of a Backend if any Routes reference it.
+  * MUST support dry-run mode for configuration changes.
+
+* **Sync:**
+  * MUST push updates to gateways via gRPC streaming (Push model).
+  * MUST support full sync on gateway startup/reconnection.
+  * MUST include config version number for consistency checks.
+
+* **Secrets Management:**
+  * MUST support multiple secret backends: `vault://`, `aws-sm://`, `k8s-secret://`
+  * MUST NOT log or expose secret values in responses.
+  * MUST support secret rotation without gateway restart.
+
+### 6.2. Data Plane (Pingora Gateway)
+
+* **Routing Logic:**
+  * MUST use a **Radix Trie** (matchit crate) to resolve path conflicts using "Longest Prefix Match".
+  * MUST isolate routing tables per tenant (subdomain).
+
+* **Provider Selection:**
+  * MUST resolve Backend → Provider chain at request time.
+  * MUST apply load balancing algorithm to select healthy Provider.
+  * MUST share connection pools per Provider (not per Backend).
+
+* **Protocol Adaptation:**
+  * MUST apply Provider-specific adapter transformations in order: Auth → Headers → URL → Body.
+  * MUST support body transformations for request (field mappings, restructuring).
+  * MUST support body transformations for response (normalize to canonical format).
+  * MUST handle streaming responses with chunked body transformations.
+  * MUST support custom adapter plugins for new providers.
+
+* **Streaming:**
+  * MUST support Server-Sent Events (SSE) passthrough for AI token streaming.
+  * MUST transform SSE chunks according to response adapter when normalizing responses.
+  * SHOULD support WebSocket connections for bidirectional streaming.
+
+* **Resilience:**
+  * MUST implement circuit breaker pattern per Provider.
+  * MUST execute active health checks per Provider at configured intervals.
+  * MUST gracefully degrade when controller is unavailable (use cached config).
+
+
+
+---
+
+## 7. Architecture & Data Structures (Rust)
+
+### 7.1. Shared Memory Model
+
+The Gateway state is held in `Arc<RwLock<...>>` to allow non-blocking reads and atomic writes.
+
+```rust
+struct GatewayState {
+    // Config version for consistency checks
+    config_version: AtomicU64,
+    
+    // Provider Registry: Map<ProviderID, ProviderInstance>
+    providers: Arc<RwLock<HashMap<String, Arc<ProviderInstance>>>>,
+
+    // Backend Registry: Map<BackendID, BackendInstance>
+    backends: Arc<RwLock<HashMap<String, Arc<BackendInstance>>>>,
+
+    // Router (Per Tenant): Map<Hostname, RadixRouter>
+    routers: Arc<RwLock<HashMap<String, matchit::Router<RouteData>>>>,
+    
+    // Health status per provider
+    health_status: Arc<RwLock<HashMap<ProviderId, HealthState>>>,
+}
+
+struct ProviderInstance {
+    id: String,
+    config: ProviderConfig,
+    adapter: Box<dyn ProtocolAdapter>,
+    pool: Arc<ClientPool>,
+}
+
+struct BackendInstance {
+    id: String,
+    config: BackendConfig,
+    provider_refs: Vec<ProviderRef>,
+    circuit_breakers: HashMap<ProviderId, CircuitBreaker>,
+}
+
+struct ProviderRef {
+    provider_id: String,
+    priority: u32,
+    weight: u32,
+}
+
+struct RouteData {
+    id: String,
+    filters: Vec<FilterConfig>,
+    backend_ref: String,
+}
+
+enum HealthState {
+    Healthy,
+    Unhealthy { since: Instant, consecutive_failures: u32 },
+    Unknown,
+}
+```
+
+### 7.2. Protocol Adapter Architecture
+
+The adapter system is designed to be extensible, supporting both built-in and custom transformations.
+
+```rust
+/// Core adapter trait - all adapters must implement this
+#[async_trait]
+pub trait ProtocolAdapter: Send + Sync {
+    /// Transform request URL
+    fn adapt_url(&self, url: &mut Url) -> Result<(), AdapterError>;
+    
+    /// Transform request headers
+    fn adapt_request_headers(&self, headers: &mut HeaderMap) -> Result<(), AdapterError>;
+    
+    /// Transform request body (JSON)
+    fn adapt_request_body(&self, body: &mut Value) -> Result<(), AdapterError>;
+    
+    /// Transform response headers
+    fn adapt_response_headers(&self, headers: &mut HeaderMap) -> Result<(), AdapterError>;
+    
+    /// Transform response body (JSON)
+    fn adapt_response_body(&self, body: &mut Value) -> Result<(), AdapterError>;
+    
+    /// Provider type identifier
+    fn provider_type(&self) -> &'static str;
+}
+
+/// Configuration-driven adapter built from Provider spec
+pub struct ConfigurableAdapter {
+    auth: AuthConfig,
+    headers: HeaderTransforms,
+    url: UrlTransforms,
+    request_body: BodyTransforms,
+    response_body: BodyTransforms,
+}
+
+/// Body transformation configuration
+pub struct BodyTransforms {
+    format: BodyFormat,
+    field_mappings: HashMap<String, String>,  // JSONPath mappings
+    defaults: HashMap<String, Value>,
+    remove_fields: Vec<String>,
+    transforms: Vec<TransformStep>,
+}
+
+pub enum BodyFormat {
+    OpenAIChat,      // Canonical format
+    Anthropic,
+    GoogleAI,
+    BedrockClaude,
+    Custom,
+}
+
+pub enum TransformStep {
+    FieldMapping { from: String, to: String },
+    ExtractSystemMessage,
+    RoleMapping { mappings: HashMap<String, String> },
+    Wrap { field: String, value: Value },
+    Flatten { path: String },
+    RemoveFields { fields: Vec<String> },
+    InjectDefaults { values: HashMap<String, Value> },
+    Template { template: String },  // JSONPath template
+}
+```
+
+#### Built-in Adapter Implementations
+
+```rust
+/// Registry of adapter factories
+pub struct AdapterRegistry {
+    factories: HashMap<String, Box<dyn AdapterFactory>>,
+}
+
+impl AdapterRegistry {
+    pub fn new() -> Self {
+        let mut registry = Self { factories: HashMap::new() };
+        
+        // Register built-in adapters
+        registry.register("openai", OpenAIAdapterFactory);
+        registry.register("anthropic", AnthropicAdapterFactory);
+        registry.register("azure_openai", AzureOpenAIAdapterFactory);
+        registry.register("google_ai", GoogleAIAdapterFactory);
+        registry.register("bedrock", BedrockAdapterFactory);
+        registry.register("custom", CustomAdapterFactory);
+        
+        registry
+    }
+    
+    pub fn create(&self, provider_type: &str, config: &AdapterConfig) 
+        -> Result<Box<dyn ProtocolAdapter>, AdapterError> 
+    {
+        self.factories
+            .get(provider_type)
+            .ok_or(AdapterError::UnknownProvider)?
+            .create(config)
+    }
+}
+
+pub trait AdapterFactory: Send + Sync {
+    fn create(&self, config: &AdapterConfig) -> Result<Box<dyn ProtocolAdapter>, AdapterError>;
+}
+```
+
+#### Example: Anthropic Adapter Implementation
+
+```rust
+pub struct AnthropicAdapter {
+    api_key: SecretRef,
+    version: String,
+    field_mappings: HashMap<String, String>,
+}
+
+impl ProtocolAdapter for AnthropicAdapter {
+    fn adapt_request_headers(&self, headers: &mut HeaderMap) -> Result<(), AdapterError> {
+        headers.insert("x-api-key", self.api_key.resolve()?);
+        headers.insert("anthropic-version", self.version.clone());
+        headers.remove("Authorization");
+        Ok(())
+    }
+    
+    fn adapt_request_body(&self, body: &mut Value) -> Result<(), AdapterError> {
+        // Extract system message from messages array to top-level
+        if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+            if let Some(pos) = messages.iter().position(|m| m["role"] == "system") {
+                let system_msg = messages.remove(pos);
+                body["system"] = system_msg["content"].clone();
+            }
+        }
+        
+        // Rename fields: stop -> stop_sequences
+        if let Some(stop) = body.get("stop").cloned() {
+            body["stop_sequences"] = stop;
+            body.as_object_mut().unwrap().remove("stop");
+        }
+        
+        Ok(())
+    }
+    
+    fn adapt_response_body(&self, body: &mut Value) -> Result<(), AdapterError> {
+        // Transform Anthropic response to OpenAI format
+        let content = body["content"][0]["text"].clone();
+        let finish_reason = match body["stop_reason"].as_str() {
+            Some("end_turn") => "stop",
+            Some("max_tokens") => "length",
+            _ => "stop"
+        };
+        
+        *body = json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": content },
+                "finish_reason": finish_reason
+            }],
+            "usage": body["usage"].clone()
+        });
+        
+        Ok(())
+    }
+    
+    fn provider_type(&self) -> &'static str { "anthropic" }
+}
+```
+
+### 7.3. Filter System Architecture
+
+The filter system is designed for maximum extensibility, supporting both built-in and custom filters.
+
+```rust
+/// Filter execution phase
+#[derive(Clone, Copy, PartialEq)]
+pub enum FilterPhase {
+    PreRoute,      // Before route matching
+    PreBackend,    // After route match, before provider selection
+    PostAdapter,   // After adapter transforms request
+    PreAdapter,    // Before adapter transforms response
+    PostBackend,   // After adapter normalizes response  
+    PostRoute,     // Before returning to client
+}
+
+/// Core filter trait - all filters must implement this
+#[async_trait]
+pub trait Filter: Send + Sync {
+    /// Filter identifier
+    fn name(&self) -> &'static str;
+    
+    /// Phases this filter can run in
+    fn supported_phases(&self) -> &[FilterPhase];
+    
+    /// Process request (called in request phases)
+    async fn on_request(
+        &self, 
+        ctx: &mut FilterContext,
+        phase: FilterPhase,
+    ) -> FilterResult;
+    
+    /// Process response (called in response phases)
+    async fn on_response(
+        &self, 
+        ctx: &mut FilterContext,
+        phase: FilterPhase,
+    ) -> FilterResult;
+    
+    /// JSON schema for filter configuration
+    fn config_schema(&self) -> &'static str;
+}
+
+/// Shared context passed through filter chain
+pub struct FilterContext {
+    // Identifiers
+    pub request_id: String,
+    pub tenant_id: Option<String>,
+    pub route_id: Option<String>,
+    pub backend_id: Option<String>,
+    pub provider_id: Option<String>,
+    
+    // Request/Response (mutable)
+    pub request: Request,
+    pub response: Option<Response>,
+    
+    // Authentication state
+    pub auth: AuthContext,
+    
+    // Rate limiting state
+    pub rate_limit: RateLimitContext,
+    
+    // Token counting
+    pub tokens: TokenContext,
+    
+    // Timing
+    pub timing: TimingContext,
+    
+    // Custom metadata (filters can read/write)
+    pub metadata: HashMap<String, Value>,
+    
+    // Distributed state store handle
+    pub state_store: Arc<dyn StateStore>,
+}
+
+pub struct AuthContext {
+    pub authenticated: bool,
+    pub method: Option<AuthMethod>,
+    pub api_key_id: Option<String>,
+    pub user_id: Option<String>,
+    pub tenant_id: Option<String>,
+    pub claims: HashMap<String, Value>,
+    pub metadata: HashMap<String, Value>,
+}
+
+pub struct RateLimitContext {
+    pub limits_checked: Vec<RateLimitResult>,
+    pub should_throttle: bool,
+    pub retry_after: Option<Duration>,
+}
+
+pub struct TokenContext {
+    pub input_estimated: Option<u32>,
+    pub input_actual: Option<u32>,
+    pub output_actual: Option<u32>,
+    pub model: Option<String>,
+}
+
+/// Filter execution result
+pub enum FilterResult {
+    /// Continue to next filter
+    Continue,
+    
+    /// Short-circuit with response (e.g., auth failure, rate limit)
+    Terminate(Response),
+    
+    /// Skip remaining filters in this phase
+    SkipPhase,
+    
+    /// Error occurred
+    Error { 
+        code: u16, 
+        message: String,
+        retryable: bool,
+    },
+}
+
+/// Filter registry for dynamic filter loading
+pub struct FilterRegistry {
+    filters: HashMap<String, Arc<dyn FilterFactory>>,
+}
+
+impl FilterRegistry {
+    pub fn new() -> Self {
+        let mut registry = Self { filters: HashMap::new() };
+        
+        // Authentication filters
+        registry.register("auth_jwt", AuthJwtFilterFactory);
+        registry.register("auth_api_key", AuthApiKeyFilterFactory);
+        registry.register("auth_oauth2", AuthOAuth2FilterFactory);
+        registry.register("auth_mtls", AuthMtlsFilterFactory);
+        
+        // Rate limiting filters
+        registry.register("rate_limit", RateLimitFilterFactory);
+        registry.register("concurrent_limit", ConcurrentLimitFilterFactory);
+        registry.register("quota", QuotaFilterFactory);
+        
+        // Transformation filters
+        registry.register("transform_headers", TransformHeadersFilterFactory);
+        registry.register("transform_body", TransformBodyFilterFactory);
+        registry.register("transform_url", TransformUrlFilterFactory);
+        
+        // AI-specific filters
+        registry.register("token_counter", TokenCounterFilterFactory);
+        registry.register("pii_masking", PiiMaskingFilterFactory);
+        registry.register("prompt_injection", PromptInjectionFilterFactory);
+        registry.register("content_filter", ContentFilterFilterFactory);
+        registry.register("semantic_cache", SemanticCacheFilterFactory);
+        registry.register("cost_tracker", CostTrackerFilterFactory);
+        registry.register("model_router", ModelRouterFilterFactory);
+        
+        // Observability filters
+        registry.register("request_logger", RequestLoggerFilterFactory);
+        registry.register("metrics", MetricsFilterFactory);
+        
+        registry
+    }
+    
+    pub fn create(
+        &self, 
+        name: &str, 
+        config: &Value,
+    ) -> Result<Arc<dyn Filter>, FilterError> {
+        self.filters
+            .get(name)
+            .ok_or(FilterError::UnknownFilter(name.to_string()))?
+            .create(config)
+    }
+    
+    pub fn schemas(&self) -> HashMap<&str, &str> {
+        self.filters
+            .iter()
+            .map(|(name, factory)| (name.as_str(), factory.config_schema()))
+            .collect()
+    }
+}
+
+pub trait FilterFactory: Send + Sync {
+    fn create(&self, config: &Value) -> Result<Arc<dyn Filter>, FilterError>;
+    fn config_schema(&self) -> &'static str;
+}
+```
+
+#### Distributed State Store
+
+```rust
+/// Abstraction for distributed state (Redis, etc.)
+#[async_trait]
+pub trait StateStore: Send + Sync {
+    /// Increment counter with TTL
+    async fn incr(
+        &self, 
+        key: &str, 
+        amount: i64, 
+        ttl: Duration,
+    ) -> Result<i64, StateError>;
+    
+    /// Get counter value
+    async fn get(&self, key: &str) -> Result<Option<i64>, StateError>;
+    
+    /// Set value with TTL
+    async fn set(
+        &self, 
+        key: &str, 
+        value: &[u8], 
+        ttl: Duration,
+    ) -> Result<(), StateError>;
+    
+    /// Get value
+    async fn get_bytes(&self, key: &str) -> Result<Option<Vec<u8>>, StateError>;
+    
+    /// Delete key
+    async fn delete(&self, key: &str) -> Result<(), StateError>;
+    
+    /// Atomic compare-and-swap
+    async fn cas(
+        &self,
+        key: &str,
+        expected: Option<&[u8]>,
+        new_value: &[u8],
+        ttl: Duration,
+    ) -> Result<bool, StateError>;
+    
+    /// Sliding window rate limit check
+    async fn rate_limit_check(
+        &self,
+        key: &str,
+        limit: u64,
+        window: Duration,
+        cost: u64,
+    ) -> Result<RateLimitResult, StateError>;
+}
+
+pub struct RateLimitResult {
+    pub allowed: bool,
+    pub remaining: u64,
+    pub reset_at: SystemTime,
+    pub retry_after: Option<Duration>,
+}
+
+/// Redis implementation
+pub struct RedisStateStore {
+    pool: Pool<RedisConnectionManager>,
+    key_prefix: String,
+}
+```
+
+#### Example: Rate Limit Filter Implementation
+
+```rust
+pub struct RateLimitFilter {
+    config: RateLimitConfig,
+}
+
+pub struct RateLimitConfig {
+    limits: Vec<LimitRule>,
+    response_headers: bool,
+}
+
+pub struct LimitRule {
+    name: String,
+    limit: u64,
+    window: Duration,
+    algorithm: RateLimitAlgorithm,
+    key_type: RateLimitKey,
+    scope: RateLimitScope,
+    burst: Option<u64>,
+}
+
+#[async_trait]
+impl Filter for RateLimitFilter {
+    fn name(&self) -> &'static str { "rate_limit" }
+    
+    fn supported_phases(&self) -> &[FilterPhase] {
+        &[FilterPhase::PreRoute, FilterPhase::PreBackend]
+    }
+    
+    async fn on_request(
+        &self,
+        ctx: &mut FilterContext,
+        _phase: FilterPhase,
+    ) -> FilterResult {
+        for rule in &self.config.limits {
+            // Build rate limit key
+            let key = self.build_key(rule, ctx);
+            
+            // Determine cost (1 for requests, estimated tokens for token limits)
+            let cost = match rule.key_type {
+                RateLimitKey::Request => 1,
+                RateLimitKey::Token => ctx.tokens.input_estimated.unwrap_or(0) as u64,
+                RateLimitKey::Byte => ctx.request.body().len() as u64,
+            };
+            
+            // Check rate limit
+            let result = ctx.state_store
+                .rate_limit_check(&key, rule.limit, rule.window, cost)
+                .await
+                .map_err(|e| FilterResult::Error {
+                    code: 500,
+                    message: format!("Rate limit check failed: {}", e),
+                    retryable: true,
+                })?;
+            
+            // Store result in context
+            ctx.rate_limit.limits_checked.push(result.clone());
+            
+            if !result.allowed {
+                ctx.rate_limit.should_throttle = true;
+                ctx.rate_limit.retry_after = result.retry_after;
+                
+                return FilterResult::Terminate(Response::builder()
+                    .status(429)
+                    .header("Retry-After", result.retry_after.unwrap().as_secs())
+                    .header("X-RateLimit-Limit", rule.limit)
+                    .header("X-RateLimit-Remaining", 0)
+                    .body(json!({
+                        "error": {
+                            "code": "RATE_LIMIT_EXCEEDED",
+                            "message": format!("Rate limit '{}' exceeded", rule.name),
+                            "retry_after": result.retry_after.unwrap().as_secs()
+                        }
+                    }))
+                    .build());
+            }
+        }
+        
+        FilterResult::Continue
+    }
+    
+    async fn on_response(
+        &self,
+        ctx: &mut FilterContext,
+        _phase: FilterPhase,
+    ) -> FilterResult {
+        // For token-based limits, adjust count based on actual usage
+        if let Some(actual_tokens) = ctx.tokens.output_actual {
+            // Could adjust/credit back if estimated != actual
+        }
+        
+        // Add rate limit headers to response
+        if self.config.response_headers {
+            if let Some(res) = &mut ctx.response {
+                for result in &ctx.rate_limit.limits_checked {
+                    res.headers_mut().insert(
+                        "X-RateLimit-Remaining",
+                        result.remaining.to_string(),
+                    );
+                }
+            }
+        }
+        
+        FilterResult::Continue
+    }
+    
+    fn config_schema(&self) -> &'static str {
+        include_str!("schemas/rate_limit.json")
+    }
+}
+```
+
+### 7.4. Filter Pipeline Execution
+
+```rust
+pub struct FilterPipeline {
+    global_filters: Vec<FilterInstance>,
+    state_store: Arc<dyn StateStore>,
+}
+
+pub struct FilterInstance {
+    filter: Arc<dyn Filter>,
+    phase: FilterPhase,
+    condition: Option<Condition>,
+    on_error: OnErrorBehavior,
+    timeout: Duration,
+}
+
+impl FilterPipeline {
+    pub async fn execute_request(
+        &self,
+        ctx: &mut FilterContext,
+        route_filters: &[FilterInstance],
+    ) -> Result<(), FilterResult> {
+        // PRE_ROUTE phase (global only - route not yet matched)
+        self.execute_phase(ctx, FilterPhase::PreRoute, &self.global_filters, &[]).await?;
+        
+        // Route matching happens here (outside pipeline)
+        
+        // PRE_BACKEND phase
+        self.execute_phase(ctx, FilterPhase::PreBackend, &self.global_filters, route_filters).await?;
+        
+        // POST_ADAPTER phase (after adapter transforms)
+        self.execute_phase(ctx, FilterPhase::PostAdapter, &self.global_filters, route_filters).await?;
+        
+        Ok(())
+    }
+    
+    pub async fn execute_response(
+        &self,
+        ctx: &mut FilterContext,
+        route_filters: &[FilterInstance],
+    ) -> Result<(), FilterResult> {
+        // PRE_ADAPTER phase (before adapter normalizes)
+        self.execute_phase(ctx, FilterPhase::PreAdapter, &self.global_filters, route_filters).await?;
+        
+        // POST_BACKEND phase
+        self.execute_phase(ctx, FilterPhase::PostBackend, &self.global_filters, route_filters).await?;
+        
+        // POST_ROUTE phase
+        self.execute_phase(ctx, FilterPhase::PostRoute, &self.global_filters, route_filters).await?;
+        
+        Ok(())
+    }
+    
+    async fn execute_phase(
+        &self,
+        ctx: &mut FilterContext,
+        phase: FilterPhase,
+        global: &[FilterInstance],
+        route: &[FilterInstance],
+    ) -> Result<(), FilterResult> {
+        // Global filters first, then route filters
+        let filters: Vec<_> = global.iter()
+            .chain(route.iter())
+            .filter(|f| f.phase == phase)
+            .collect();
+        
+        for instance in filters {
+            // Check condition
+            if let Some(cond) = &instance.condition {
+                if !cond.evaluate(ctx) {
+                    continue;
+                }
+            }
+            
+            // Execute with timeout
+            let result = tokio::time::timeout(
+                instance.timeout,
+                if phase.is_request_phase() {
+                    instance.filter.on_request(ctx, phase)
+                } else {
+                    instance.filter.on_response(ctx, phase)
+                }
+            ).await;
+            
+            match result {
+                Ok(FilterResult::Continue) => continue,
+                Ok(FilterResult::SkipPhase) => break,
+                Ok(FilterResult::Terminate(response)) => {
+                    return Err(FilterResult::Terminate(response));
+                }
+                Ok(FilterResult::Error { code, message, retryable }) => {
+                    match instance.on_error {
+                        OnErrorBehavior::Terminate => {
+                            return Err(FilterResult::Error { code, message, retryable });
+                        }
+                        OnErrorBehavior::LogAndContinue => {
+                            tracing::warn!(filter = instance.filter.name(), %message, "Filter error, continuing");
+                            continue;
+                        }
+                        OnErrorBehavior::Skip => continue,
+                    }
+                }
+                Err(_timeout) => {
+                    tracing::warn!(filter = instance.filter.name(), "Filter timeout");
+                    match instance.on_error {
+                        OnErrorBehavior::Terminate => {
+                            return Err(FilterResult::Error {
+                                code: 504,
+                                message: "Filter timeout".to_string(),
+                                retryable: true,
+                            });
+                        }
+                        _ => continue,
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+}
+```
+
+---
+
+## 8. Conflict Resolution Strategy
+
+| Conflict Type | Strategy | Implementation |
+| --- | --- | --- |
+| **User vs. User** | **Strict Isolation** | Users are assigned unique subdomains (`tenant.gateway.com`). No cross-tenant routing possible. |
+| **Route vs. Route** | **Longest Prefix Match** | If a user defines `/api` and `/api/v1`, the Radix Trie automatically routes `/api/v1` to the more specific rule. |
+| **Filter Order** | **Phase + Definition Order** | Global filters run before route filters within each phase. Within same phase, order follows config array. |
+| **Config Version** | **Last Write Wins** | Controller maintains version numbers; gateways reject stale updates. |
+
+---
+
+## 9. Observability
+
+### 9.1. Metrics (Prometheus Format)
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `gateway_requests_total` | Counter | `tenant`, `route`, `method`, `status` | Total requests processed |
+| `gateway_request_duration_seconds` | Histogram | `tenant`, `route`, `backend`, `provider` | Request latency distribution |
+| `gateway_tokens_total` | Counter | `tenant`, `route`, `direction`, `type` | Token count (input/output, estimated/actual) |
+| `gateway_provider_health` | Gauge | `provider` | Provider health status (1=healthy, 0=unhealthy) |
+| `gateway_circuit_breaker_state` | Gauge | `backend`, `provider` | Circuit state (0=closed, 1=open, 2=half-open) |
+| `gateway_connection_pool_size` | Gauge | `provider` | Current pool connection count |
+| `gateway_filter_duration_seconds` | Histogram | `filter`, `phase`, `route` | Filter execution time |
+| `gateway_filter_errors_total` | Counter | `filter`, `phase`, `error_type` | Filter error count |
+| `gateway_rate_limit_hits_total` | Counter | `tenant`, `rule`, `scope` | Rate limit violations |
+| `gateway_cache_hits_total` | Counter | `cache_type`, `tenant` | Cache hit count |
+| `gateway_cache_misses_total` | Counter | `cache_type`, `tenant` | Cache miss count |
+| `gateway_cost_total` | Counter | `tenant`, `provider`, `model` | Estimated cost in cents |
+| `gateway_config_version` | Gauge | `gateway_id` | Current config version |
+
+### 9.2. Distributed Tracing (OpenTelemetry)
+
+Each request generates a trace with spans:
+- `gateway.request` - Root span for entire request lifecycle
+- `gateway.filter.{name}` - Span per filter execution
+- `gateway.backend.select` - Provider selection logic
+- `gateway.provider.request` - Outbound request to AI provider
+- `gateway.response.stream` - SSE streaming duration (if applicable)
+
+**Required Headers:**
+- Propagate `traceparent` and `tracestate` headers (W3C Trace Context)
+- Generate `X-Request-ID` if not present
+
+### 9.3. Structured Logging
+
+```json
+{
+  "timestamp": "2026-01-22T10:30:00Z",
+  "level": "info",
+  "request_id": "req_abc123",
+  "trace_id": "trace_xyz789",
+  "tenant": "org-1",
+  "route": "route_chat_v1",
+  "method": "POST",
+  "path": "/v1/chat",
+  "status": 200,
+  "duration_ms": 1234,
+  "backend": "backend_hybrid_prod",
+  "provider": "provider_openai_prod",
+  "tokens_in": 150,
+  "tokens_out": 500
+}
+```
+
+---
+
+## 10. Non-Functional Requirements
+
+### 10.1. Performance Targets
+
+| Metric | Target | Notes |
+|--------|--------|-------|
+| **Latency (p50)** | < 5ms added | Gateway overhead only, excludes upstream |
+| **Latency (p99)** | < 20ms added | Under normal load |
+| **Throughput** | 10,000 RPS per instance | Non-streaming requests |
+| **Concurrent Connections** | 50,000 per instance | Across all tenants |
+| **Config Update Latency** | < 100ms | Time from controller push to gateway apply |
+
+### 10.2. Availability
+
+- **Gateway SLA:** 99.9% availability
+- **Graceful Degradation:** Continue serving with cached config if controller unavailable
+- **Zero-Downtime Deploys:** Support rolling updates without dropped connections
+
+### 10.3. Security
+
+| Requirement | Implementation |
+|-------------|----------------|
+| **TLS Termination** | Required for all inbound traffic (TLS 1.2+) |
+| **mTLS to Providers** | Optional, configurable per provider |
+| **Secret Storage** | No plaintext secrets in config; reference external stores |
+| **Input Validation** | Sanitize all user inputs; reject malformed requests |
+| **Rate Limiting** | Prevent abuse with configurable limits |
+| **Audit Logging** | Log all config changes with actor identity |
+
+### 10.4. Scalability
+
+- **Horizontal Scaling:** Add gateway instances behind load balancer
+- **Multi-Region:** Support geo-distributed deployments with regional controllers
+- **Tenant Isolation:** Resource quotas prevent noisy neighbor issues
+
+---
+
+## 11. Development Phases
+
+### Phase 1: Core Foundation (Weeks 1-3)
+**Goal:** Basic proxy functionality with config management
+
+- [ ] Implement `Provider`, `Backend`, and `Route` Rust structs with validation
+- [ ] Build `RadixRouter` lookup logic in Pingora's `upstream_peer`
+- [ ] Implement pass-through proxying (no filters)
+- [ ] Implement local config file loading
+- [ ] Add basic health endpoint (`/v1/health`)
+- [ ] Set up Prometheus metrics endpoint
+- [ ] **Deliverable:** Gateway that routes requests based on static config file
+
+### Phase 2: Resilience & Connectivity (Weeks 4-6)
+**Goal:** Production-grade connection handling
+
+- [ ] Implement `ProtocolAdapter` trait and body transformation engine
+- [ ] Build adapters for OpenAI, Azure, Anthropic, Google AI, Bedrock
+- [ ] Implement connection pool sharing per Provider
+- [ ] Add circuit breaker per Provider
+- [ ] Implement active health checks
+- [ ] Add retry with exponential backoff
+- [ ] Support multiple load balancing algorithms
+- [ ] **Deliverable:** Gateway with failover, health checks, and protocol adaptation
+
+### Phase 3: Filter Framework (Weeks 7-9)
+**Goal:** Extensible filter pipeline with core filters
+
+- [ ] Implement `Filter` trait with phases (PRE_ROUTE, PRE_BACKEND, etc.)
+- [ ] Build `FilterRegistry` for dynamic filter loading
+- [ ] Implement `FilterContext` for shared state between filters
+- [ ] Build `FilterPipeline` executor with phase ordering
+- [ ] Implement `auth_jwt` filter
+- [ ] Implement `auth_api_key` filter with Redis backend
+- [ ] Implement basic `transform_headers` filter
+- [ ] Implement basic `transform_body` filter
+- [ ] Support SSE streaming passthrough
+- [ ] **Deliverable:** Gateway with authentication and basic transformations
+
+### Phase 4: Distributed State & Rate Limiting (Weeks 10-12)
+**Goal:** Production-grade rate limiting and caching
+
+- [ ] Implement `StateStore` trait and Redis implementation
+- [ ] Build `rate_limit` filter with multiple algorithms
+- [ ] Support request-based and token-based rate limiting
+- [ ] Implement `concurrent_limit` filter
+- [ ] Implement `quota` filter for usage limits
+- [ ] Implement `token_counter` filter (tiktoken integration)
+- [ ] Add rate limit response headers
+- [ ] **Deliverable:** Gateway with distributed rate limiting
+
+### Phase 5: AI-Specific Filters (Weeks 13-15)
+**Goal:** AI-native capabilities
+
+- [ ] Implement `pii_masking` filter (streaming body inspection)
+- [ ] Implement `prompt_injection` filter (pattern + classifier)
+- [ ] Implement `content_filter` filter
+- [ ] Implement `semantic_cache` filter with vector store
+- [ ] Implement `cost_tracker` filter
+- [ ] Implement `model_router` filter
+- [ ] **Deliverable:** Gateway with AI-specific security and optimization
+
+### Phase 6: Controller Integration (Weeks 16-18)
+**Goal:** Dynamic configuration and multi-gateway management
+
+- [ ] Define gRPC proto for controller ↔ gateway communication
+- [ ] Implement config sync protocol (full + incremental)
+- [ ] Add local snapshot persistence (for controller unavailability)
+- [ ] Implement hot config reload (zero-downtime updates)
+- [ ] Add config version validation
+- [ ] Implement controller health reporting
+- [ ] Build API key management endpoints
+- [ ] Build usage statistics endpoints
+- [ ] **Deliverable:** Gateway that syncs config from external controller
+
+### Phase 7: Observability & Hardening (Weeks 19-20)
+**Goal:** Production readiness
+
+- [ ] Integrate OpenTelemetry tracing with filter spans
+- [ ] Add structured JSON logging
+- [ ] Implement audit logging for config changes
+- [ ] Performance testing and optimization
+- [ ] Security audit and penetration testing
+- [ ] Documentation and runbooks
+- [ ] **Deliverable:** Production-ready gateway with full observability
+
+---
+
+## 12. Appendix
+
+### A. Secret Reference Formats
+
+| Format | Backend | Example |
+|--------|---------|---------|
+| `vault://` | HashiCorp Vault | `vault://secret/data/openai-key` |
+| `aws-sm://` | AWS Secrets Manager | `aws-sm://prod/openai/api-key` |
+| `k8s-secret://` | Kubernetes Secrets | `k8s-secret://default/openai-creds/api-key` |
+| `env://` | Environment Variable | `env://OPENAI_API_KEY` |
+
+### B. Body Transformation Examples
+
+#### B.1. OpenAI → Anthropic Request Transform
+
+**Input (OpenAI format):**
+```json
+{
+  "model": "gpt-4",
+  "messages": [
+    { "role": "system", "content": "You are a helpful assistant." },
+    { "role": "user", "content": "Hello!" }
+  ],
+  "temperature": 0.7,
+  "max_tokens": 1000,
+  "stop": ["END"]
+}
+```
+
+**Output (Anthropic format):**
+```json
+{
+  "model": "claude-3-opus-20240229",
+  "system": "You are a helpful assistant.",
+  "messages": [
+    { "role": "user", "content": "Hello!" }
+  ],
+  "temperature": 0.7,
+  "max_tokens": 1000,
+  "stop_sequences": ["END"]
+}
+```
+
+**Transforms Applied:**
+1. `extract_system_message` - Move system to top-level
+2. `field_mapping`: `stop` → `stop_sequences`
+3. `field_mapping`: `model` → provider-specific model name
+
+#### B.2. OpenAI → Google AI Request Transform
+
+**Input (OpenAI format):**
+```json
+{
+  "model": "gpt-4",
+  "messages": [
+    { "role": "user", "content": "What is 2+2?" },
+    { "role": "assistant", "content": "4" },
+    { "role": "user", "content": "And 3+3?" }
+  ],
+  "temperature": 0.5,
+  "top_p": 0.9,
+  "max_tokens": 500
+}
+```
+
+**Output (Google AI format):**
+```json
+{
+  "contents": [
+    { "role": "user", "parts": [{ "text": "What is 2+2?" }] },
+    { "role": "model", "parts": [{ "text": "4" }] },
+    { "role": "user", "parts": [{ "text": "And 3+3?" }] }
+  ],
+  "generationConfig": {
+    "temperature": 0.5,
+    "topP": 0.9,
+    "maxOutputTokens": 500
+  }
+}
+```
+
+**Transforms Applied:**
+1. `field_mapping`: `messages` → `contents`
+2. `field_mapping`: `messages[].content` → `contents[].parts[].text`
+3. `role_mapping`: `assistant` → `model`
+4. `field_mapping`: `temperature` → `generationConfig.temperature`
+5. `field_mapping`: `top_p` → `generationConfig.topP`
+6. `field_mapping`: `max_tokens` → `generationConfig.maxOutputTokens`
+
+#### B.3. Anthropic → OpenAI Response Transform
+
+**Input (Anthropic response):**
+```json
+{
+  "id": "msg_123",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    { "type": "text", "text": "Hello! How can I help you?" }
+  ],
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 8
+  }
+}
+```
+
+**Output (OpenAI format - normalized):**
+```json
+{
+  "id": "msg_123",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello! How can I help you?"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 8,
+    "total_tokens": 18
+  }
+}
+```
+
+### C. Complete Adapter Configuration Schema
+
+```json
+{
+  "adapter": {
+    "auth": {
+      "type": "bearer | header | query_param | aws_sigv4 | none",
+      "key": "header-name",
+      "secret_ref": "vault://path",
+      "region": "us-east-1",
+      "service": "bedrock"
+    },
+    
+    "headers": {
+      "add": { "Header-Name": "value" },
+      "remove": ["Unwanted-Header"],
+      "pass_through": ["X-Custom-*"]
+    },
+    
+    "url": {
+      "path_prefix": "/v1/chat/completions",
+      "path_template": "/model/{model}/invoke",
+      "query_params": { "api-version": "2023-05-15" },
+      "strip_path_prefix": "/gateway"
+    },
+    
+    "request_body": {
+      "format": "openai_chat | anthropic | google_ai | bedrock_claude | custom",
+      "field_mappings": {
+        "source.path": "target.path"
+      },
+      "defaults": {
+        "field_name": "default_value"
+      },
+      "remove_fields": ["field_to_remove"],
+      "transforms": [
+        { "type": "extract_system_message" },
+        { "type": "role_mapping", "mappings": { "assistant": "model" } },
+        { "type": "wrap", "field": "anthropic_version", "value": "..." },
+        { "type": "template", "template": "..." }
+      ]
+    },
+    
+    "response_body": {
+      "format": "openai_chat | anthropic | google_ai | bedrock_claude | custom",
+      "normalize_to": "openai_chat",
+      "field_mappings": {
+        "source.path": "target.path"
+      },
+      "transforms": []
+    },
+    
+    "streaming": {
+      "sse_format": "openai | anthropic | google_ai | custom",
+      "normalize_chunks": true,
+      "chunk_transforms": []
+    }
+  }
+}
+```
+
+### D. Error Response Format
+
+All gateway errors follow a consistent format:
+
+```json
+{
+  "error": {
+    "code": "RATE_LIMIT_EXCEEDED",
+    "message": "Token rate limit exceeded. Retry after 60 seconds.",
+    "request_id": "req_abc123",
+    "retry_after": 60
+  }
+}
+```
+
+**Standard Error Codes:**
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| `ROUTE_NOT_FOUND` | 404 | No matching route for request |
+| `BACKEND_UNAVAILABLE` | 503 | All backend providers unhealthy |
+| `PROVIDER_UNAVAILABLE` | 503 | Selected provider is unavailable |
+| `RATE_LIMIT_EXCEEDED` | 429 | Rate limit hit |
+| `AUTH_FAILED` | 401 | Authentication failed |
+| `AUTH_FORBIDDEN` | 403 | Insufficient permissions |
+| `FILTER_ERROR` | 500 | Filter processing failed |
+| `CIRCUIT_OPEN` | 503 | Circuit breaker is open |
+| `TIMEOUT` | 504 | Provider request timed out |
+| `ADAPTER_ERROR` | 502 | Body transformation failed |
+
+### E. Glossary
+
+| Term | Definition |
+|------|------------|
+| **Control Plane** | The management layer (Controller + Database) that stores config and orchestrates gateways |
+| **Data Plane** | The gateway instances that process actual traffic |
+| **Provider** | A single AI endpoint with its connection details and protocol adapter |
+| **Backend** | An orchestration layer grouping Providers with resilience policies |
+| **Route** | A traffic entry point that matches requests and forwards to a Backend |
+| **Adapter** | Protocol translation logic that transforms requests/responses for specific providers |
+| **Body Transform** | JSON manipulation to convert between provider-specific formats |
+| **Canonical Format** | The standardized request/response format (OpenAI-compatible) used internally |
+| **Hot Reload** | Updating configuration without restarting the gateway process |
+| **Circuit Breaker** | Pattern that stops sending requests to failing providers temporarily |
+| **Radix Trie** | Data structure for efficient longest-prefix-match routing |
+| **SSE** | Server-Sent Events, used for streaming AI responses |
+| **Token** | Unit of text processing in LLMs (roughly 4 characters) |
