@@ -1,0 +1,66 @@
+{
+  "providers": [
+    {
+      "id": "provider_openai_prod",
+      "name": "OpenAI Production",
+      "spec": {
+        "type": "openai",
+        "endpoint": "https://api.openai.com",
+        "adapter": {
+          "auth": {
+            "type": "bearer",
+            "secret_ref": "env://OPENAI_API_KEY"
+          },
+          "url": {
+            "path_prefix": "/v1/chat/completions"
+          }
+        }
+      }
+    }
+  ],
+  "backends": [
+    {
+      "id": "backend_main",
+      "name": "Main Backend",
+      "spec": {
+        "load_balancing": {
+          "algorithm": "failover"
+        },
+        "providers": [
+          {
+            "ref": "provider_openai_prod",
+            "priority": 1,
+            "weight": 100
+          }
+        ],
+        "timeout": {
+          "connect": "5s",
+          "response": "120s",
+          "idle": "60s"
+        },
+        "retry": {
+          "attempts": 3,
+          "backoff": {
+            "initial": "100ms",
+            "max": "10s",
+            "multiplier": 2
+          },
+          "conditions": ["5xx", "connect-failure"]
+        }
+      }
+    }
+  ],
+  "routes": [
+    {
+      "id": "route_chat_completions",
+      "spec": {
+        "match": {
+          "path": "/v1/chat",
+          "type": "prefix",
+          "methods": ["POST"]
+        },
+        "backend_ref": "backend_main"
+      }
+    }
+  ]
+}
