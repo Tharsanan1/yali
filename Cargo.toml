@@ -8,11 +8,11 @@ name = "yali_gateway"
 path = "src/lib.rs"
 
 [dependencies]
-pingora = { version = "0.5", features = ["lb"] }
-pingora-core = "0.5"
-pingora-proxy = "0.5"
-pingora-http = "0.5"
-pingora-load-balancing = "0.5"
+pingora = { version = "0.6", features = ["lb"] }
+pingora-core = "0.6"
+pingora-proxy = "0.6"
+pingora-http = "0.6"
+pingora-load-balancing = "0.6"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
