@@ -19,15 +19,9 @@ fn find_available_port() -> u16 {
 
 /// Start a mock LLM service that returns OpenAI-compatible responses
 async fn start_mock_llm_service(port: u16) -> tokio::task::JoinHandle<()> {
-    use axum::{
-        http::StatusCode,
-        routing::post,
-        Json, Router,
-    };
+    use axum::{http::StatusCode, routing::post, Json, Router};
 
-    async fn chat_completions_handler(
-        Json(payload): Json<Value>,
-    ) -> (StatusCode, Json<Value>) {
+    async fn chat_completions_handler(Json(payload): Json<Value>) -> (StatusCode, Json<Value>) {
         // Extract the model from the request
         let model = payload
             .get("model")
@@ -58,8 +52,7 @@ async fn start_mock_llm_service(port: u16) -> tokio::task::JoinHandle<()> {
         (StatusCode::OK, Json(response))
     }
 
-    let app = Router::new()
-        .route("/v1/chat/completions", post(chat_completions_handler));
+    let app = Router::new().route("/v1/chat/completions", post(chat_completions_handler));
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
         .await
@@ -172,9 +165,10 @@ async fn test_gateway_chat_completion_integration() {
 
     // Wait for gateway to be ready
     let gateway_ready = wait_for_port(gateway_port, Duration::from_secs(10)).await;
-    
+
     if !gateway_ready {
         gateway_process.kill().ok();
+        gateway_process.wait().ok(); // Wait to avoid zombie process
         std::fs::remove_file(&config_path).ok();
         panic!("Gateway failed to start within timeout");
     }
@@ -202,13 +196,17 @@ async fn test_gateway_chat_completion_integration() {
     });
 
     let response = client
-        .post(format!("http://127.0.0.1:{}/v1/chat/completions", gateway_port))
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            gateway_port
+        ))
         .json(&request_body)
         .send()
         .await;
 
     // Clean up gateway process
     gateway_process.kill().ok();
+    gateway_process.wait().ok(); // Wait to avoid zombie process
     std::fs::remove_file(&config_path).ok();
 
     let response = response.expect("Failed to send request");
@@ -222,7 +220,10 @@ async fn test_gateway_chat_completion_integration() {
     );
 
     // Parse and validate response body
-    let response_body: Value = response.json().await.expect("Failed to parse response body");
+    let response_body: Value = response
+        .json()
+        .await
+        .expect("Failed to parse response body");
 
     // Validate response structure
     assert!(
@@ -242,7 +243,7 @@ async fn test_gateway_chat_completion_integration() {
         response_body.get("choices").is_some(),
         "Response should have 'choices' field"
     );
-    
+
     let choices = response_body.get("choices").and_then(|v| v.as_array());
     assert!(choices.is_some(), "Choices should be an array");
     assert!(!choices.unwrap().is_empty(), "Choices should not be empty");
@@ -252,7 +253,7 @@ async fn test_gateway_chat_completion_integration() {
         first_choice.get("message").is_some(),
         "Choice should have 'message' field"
     );
-    
+
     let message = first_choice.get("message").unwrap();
     assert_eq!(
         message.get("role").and_then(|v| v.as_str()),
@@ -311,9 +312,10 @@ async fn test_gateway_route_not_found() {
 
     // Wait for gateway to be ready
     let gateway_ready = wait_for_port(gateway_port, Duration::from_secs(10)).await;
-    
+
     if !gateway_ready {
         gateway_process.kill().ok();
+        gateway_process.wait().ok(); // Wait to avoid zombie process
         std::fs::remove_file(&config_path).ok();
         panic!("Gateway failed to start within timeout");
     }
@@ -326,12 +328,16 @@ async fn test_gateway_route_not_found() {
 
     // Send a request to a non-existent route
     let response = client
-        .get(format!("http://127.0.0.1:{}/nonexistent/path", gateway_port))
+        .get(format!(
+            "http://127.0.0.1:{}/nonexistent/path",
+            gateway_port
+        ))
         .send()
         .await;
 
     // Clean up gateway process
     gateway_process.kill().ok();
+    gateway_process.wait().ok(); // Wait to avoid zombie process
     std::fs::remove_file(&config_path).ok();
 
     let response = response.expect("Failed to send request");
@@ -345,12 +351,15 @@ async fn test_gateway_route_not_found() {
     );
 
     // Validate error response
-    let response_body: Value = response.json().await.expect("Failed to parse response body");
+    let response_body: Value = response
+        .json()
+        .await
+        .expect("Failed to parse response body");
     assert!(
         response_body.get("error").is_some(),
         "Response should have 'error' field"
     );
-    
+
     let error = response_body.get("error").unwrap();
     assert_eq!(
         error.get("code").and_then(|v| v.as_str()),

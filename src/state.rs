@@ -97,7 +97,7 @@ impl GatewayState {
             };
 
             if let Some(host) = &route.host {
-                let router = routers.entry(host.clone()).or_insert_with(Router::new);
+                let router = routers.entry(host.clone()).or_default();
                 router
                     .insert(&match_path, route_data)
                     .map_err(|e| format!("Failed to insert route '{}': {}", route.id, e))?;
@@ -208,18 +208,24 @@ mod tests {
     #[test]
     fn test_matchit_prefix_patterns() {
         use matchit::Router;
-        
+
         let mut router: Router<&str> = Router::new();
-        
+
         // Test prefix matching with {*rest}
         router.insert("/v1/chat{*rest}", "chat_route").unwrap();
-        
+
         // These should all match
-        assert!(router.at("/v1/chat/completions").is_ok(), "/v1/chat/completions should match");
+        assert!(
+            router.at("/v1/chat/completions").is_ok(),
+            "/v1/chat/completions should match"
+        );
         assert!(router.at("/v1/chat/").is_ok(), "/v1/chat/ should match");
-        
+
         // /v1/chat (without trailing slash) doesn't match {*rest} pattern
         // This is expected matchit behavior - {*rest} requires at least one character
-        assert!(router.at("/v1/chat").is_err(), "/v1/chat should not match {{*rest}} pattern");
+        assert!(
+            router.at("/v1/chat").is_err(),
+            "/v1/chat should not match {{*rest}} pattern"
+        );
     }
 }

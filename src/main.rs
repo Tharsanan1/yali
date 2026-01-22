@@ -2,14 +2,14 @@
 //!
 //! This is the main entry point for the gateway binary.
 
-use yali_gateway::config::GatewayConfig;
-use yali_gateway::proxy::AIGatewayProxy;
-use yali_gateway::state::GatewayState;
 use pingora_core::prelude::*;
 use pingora_proxy::http_proxy_service;
 use std::sync::Arc;
 use tracing::{error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use yali_gateway::config::GatewayConfig;
+use yali_gateway::proxy::AIGatewayProxy;
+use yali_gateway::state::GatewayState;
 
 fn main() {
     // Initialize logging
@@ -62,7 +62,8 @@ fn main() {
     let mut proxy_service = http_proxy_service(&server.configuration, proxy);
 
     // Get listen address from environment or use default
-    let listen_addr = std::env::var("GATEWAY_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let listen_addr =
+        std::env::var("GATEWAY_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     info!(addr = %listen_addr, "Starting HTTP proxy service");
 
     proxy_service.add_tcp(&listen_addr);

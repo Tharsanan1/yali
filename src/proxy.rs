@@ -120,7 +120,11 @@ impl ProxyHttp for AIGatewayProxy {
 
         // Check HTTP method
         let method = req_header.method.as_str();
-        if !route_data.methods.iter().any(|m| m.eq_ignore_ascii_case(method)) {
+        if !route_data
+            .methods
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(method))
+        {
             warn!(
                 request_id = %ctx.request_id,
                 method = %method,
@@ -298,9 +302,11 @@ impl ProxyHttp for AIGatewayProxy {
                 .unwrap_or("/");
 
             let new_path_and_query = format!("{}?{}", path, new_query);
-            uri_parts.path_and_query = Some(new_path_and_query.parse().map_err(|_| {
-                Error::new(ErrorType::InvalidHTTPHeader)
-            })?);
+            uri_parts.path_and_query = Some(
+                new_path_and_query
+                    .parse()
+                    .map_err(|_| Error::new(ErrorType::InvalidHTTPHeader))?,
+            );
 
             upstream_request.set_uri(
                 http::Uri::from_parts(uri_parts)
@@ -389,10 +395,11 @@ fn parse_endpoint(endpoint: &str) -> Result<(String, u16, bool)> {
 
     let (host, port) = if let Some(idx) = stripped.find(':') {
         let h = &stripped[..idx];
-        let p_str = stripped[idx + 1..]
-            .split('/')
-            .next()
-            .unwrap_or(if use_tls { "443" } else { "80" });
+        let p_str =
+            stripped[idx + 1..]
+                .split('/')
+                .next()
+                .unwrap_or(if use_tls { "443" } else { "80" });
         let p = p_str
             .parse::<u16>()
             .unwrap_or(if use_tls { 443 } else { 80 });
