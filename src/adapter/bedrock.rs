@@ -206,13 +206,12 @@ impl ProtocolAdapter for BedrockAdapter {
 
             let combined_content = text_content.join("");
 
-            let finish_reason =
-                match bedrock_response.get("stop_reason").and_then(|r| r.as_str()) {
-                    Some("end_turn") => "stop",
-                    Some("stop_sequence") => "stop",
-                    Some("max_tokens") => "length",
-                    _ => "stop",
-                };
+            let finish_reason = match bedrock_response.get("stop_reason").and_then(|r| r.as_str()) {
+                Some("end_turn") => "stop",
+                Some("stop_sequence") => "stop",
+                Some("max_tokens") => "length",
+                _ => "stop",
+            };
 
             choices.push(json!({
                 "index": 0,

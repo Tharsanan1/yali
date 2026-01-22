@@ -41,25 +41,26 @@ impl AzureOpenAIAdapter {
             .unwrap_or_else(|| "2024-02-15-preview".to_string());
 
         // Check for deployment in path_template
-        let default_deployment = provider
-            .spec
-            .adapter
-            .url
-            .path_template
-            .as_ref()
-            .and_then(|template| {
-                // Extract deployment from template if static
-                if template.contains("{deployment}") {
-                    None // Dynamic deployment
-                } else {
-                    // Try to extract deployment from static path
-                    template
-                        .split("/deployments/")
-                        .nth(1)
-                        .and_then(|s| s.split('/').next())
-                        .map(String::from)
-                }
-            });
+        let default_deployment =
+            provider
+                .spec
+                .adapter
+                .url
+                .path_template
+                .as_ref()
+                .and_then(|template| {
+                    // Extract deployment from template if static
+                    if template.contains("{deployment}") {
+                        None // Dynamic deployment
+                    } else {
+                        // Try to extract deployment from static path
+                        template
+                            .split("/deployments/")
+                            .nth(1)
+                            .and_then(|s| s.split('/').next())
+                            .map(String::from)
+                    }
+                });
 
         Self {
             defaults: provider.spec.adapter.request_body.defaults.clone(),
@@ -71,9 +72,7 @@ impl AzureOpenAIAdapter {
 
     /// Extract deployment name from model string or use default.
     fn get_deployment(model: Option<&str>, default: &Option<String>) -> Option<String> {
-        model
-            .map(String::from)
-            .or_else(|| default.clone())
+        model.map(String::from).or_else(|| default.clone())
     }
 }
 
@@ -180,9 +179,12 @@ mod tests {
                 endpoint: "https://myresource.openai.azure.com".to_string(),
                 adapter: AdapterConfig {
                     url: UrlTransforms {
-                        query_params: [("api-version".to_string(), "2024-02-15-preview".to_string())]
-                            .into_iter()
-                            .collect(),
+                        query_params: [(
+                            "api-version".to_string(),
+                            "2024-02-15-preview".to_string(),
+                        )]
+                        .into_iter()
+                        .collect(),
                         ..Default::default()
                     },
                     ..Default::default()

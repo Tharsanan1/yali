@@ -128,9 +128,7 @@ impl HealthChecker {
     /// Record a successful request for passive health checking.
     pub fn record_success(&self, provider_id: &str) {
         if let Ok(mut states) = self.states.write() {
-            let state = states
-                .entry(provider_id.to_string())
-                .or_default();
+            let state = states.entry(provider_id.to_string()).or_default();
 
             state.consecutive_successes += 1;
             state.consecutive_failures = 0;
@@ -149,9 +147,7 @@ impl HealthChecker {
     /// Record a failed request for passive health checking.
     pub fn record_failure(&self, provider_id: &str) {
         if let Ok(mut states) = self.states.write() {
-            let state = states
-                .entry(provider_id.to_string())
-                .or_default();
+            let state = states.entry(provider_id.to_string()).or_default();
 
             state.consecutive_failures += 1;
             state.consecutive_successes = 0;
@@ -169,7 +165,8 @@ impl HealthChecker {
 
     /// Update health status based on an HTTP status code.
     pub fn record_status_code(&self, provider_id: &str, status_code: u16) {
-        if self.config.expected_statuses.contains(&status_code) || (200..300).contains(&status_code) {
+        if self.config.expected_statuses.contains(&status_code) || (200..300).contains(&status_code)
+        {
             self.record_success(provider_id);
         } else if status_code >= 500 {
             self.record_failure(provider_id);
@@ -182,12 +179,7 @@ impl HealthChecker {
         self.states
             .read()
             .ok()
-            .map(|states| {
-                states
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.status))
-                    .collect()
-            })
+            .map(|states| states.iter().map(|(k, v)| (k.clone(), v.status)).collect())
             .unwrap_or_default()
     }
 

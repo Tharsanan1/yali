@@ -7,8 +7,8 @@
 //! Tests are run serially to avoid port conflicts when spawning gateway processes.
 
 use reqwest::Client;
-use serial_test::serial;
 use serde_json::{json, Value};
+use serial_test::serial;
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -471,10 +471,7 @@ async fn test_gateway_health_endpoint() {
         stats.get("backends").is_some(),
         "Stats should have 'backends'"
     );
-    assert!(
-        stats.get("routes").is_some(),
-        "Stats should have 'routes'"
-    );
+    assert!(stats.get("routes").is_some(), "Stats should have 'routes'");
 
     println!("Health endpoint test passed!");
 }
@@ -523,7 +520,10 @@ async fn test_gateway_short_health_endpoint() {
     let response = response.expect("Failed to send request");
     assert_eq!(response.status().as_u16(), 200);
 
-    let response_body: Value = response.json().await.expect("Failed to parse response body");
+    let response_body: Value = response
+        .json()
+        .await
+        .expect("Failed to parse response body");
     assert_eq!(
         response_body.get("status").and_then(|v| v.as_str()),
         Some("healthy")
@@ -584,8 +584,13 @@ async fn test_gateway_method_not_allowed() {
         response.status()
     );
 
-    let response_body: Value = response.json().await.expect("Failed to parse response body");
-    let error = response_body.get("error").expect("Response should have error");
+    let response_body: Value = response
+        .json()
+        .await
+        .expect("Failed to parse response body");
+    let error = response_body
+        .get("error")
+        .expect("Response should have error");
     assert_eq!(
         error.get("code").and_then(|v| v.as_str()),
         Some("METHOD_NOT_ALLOWED")
@@ -706,13 +711,19 @@ async fn test_gateway_failover_load_balancing() {
     let response = response.expect("Failed to send request");
     assert_eq!(response.status().as_u16(), 200);
 
-    let response_body: Value = response.json().await.expect("Failed to parse response body");
+    let response_body: Value = response
+        .json()
+        .await
+        .expect("Failed to parse response body");
     assert_eq!(
         response_body.get("id").and_then(|v| v.as_str()),
         Some("chatcmpl-primary")
     );
 
-    let choices = response_body.get("choices").and_then(|c| c.as_array()).unwrap();
+    let choices = response_body
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .unwrap();
     let content = choices[0]
         .get("message")
         .and_then(|m| m.get("content"))
@@ -913,7 +924,10 @@ async fn test_gateway_host_based_routing() {
     let response = response.expect("Failed to send request");
     assert_eq!(response.status().as_u16(), 200);
 
-    let response_body: Value = response.json().await.expect("Failed to parse response body");
+    let response_body: Value = response
+        .json()
+        .await
+        .expect("Failed to parse response body");
     assert_eq!(
         response_body.get("id").and_then(|v| v.as_str()),
         Some("chatcmpl-tenant")

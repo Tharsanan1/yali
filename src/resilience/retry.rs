@@ -67,9 +67,7 @@ impl RetryCondition {
             "connect-failure" => Some(RetryCondition::ConnectionFailure),
             "reset" => Some(RetryCondition::Reset),
             "timeout" => Some(RetryCondition::Timeout),
-            _ if s.parse::<u16>().is_ok() => {
-                s.parse::<u16>().ok().map(RetryCondition::StatusCode)
-            }
+            _ if s.parse::<u16>().is_ok() => s.parse::<u16>().ok().map(RetryCondition::StatusCode),
             _ => None,
         }
     }
@@ -184,19 +182,22 @@ impl RetryPolicy {
         }
 
         // Check if the error matches any retry condition
-        let should_retry = self.config.retry_conditions.iter().any(|condition| {
-            match condition {
-                RetryCondition::StatusCode5xx => {
-                    error.status_code.map(|c| c >= 500 && c < 600).unwrap_or(false)
-                }
+        let should_retry = self
+            .config
+            .retry_conditions
+            .iter()
+            .any(|condition| match condition {
+                RetryCondition::StatusCode5xx => error
+                    .status_code
+                    .map(|c| c >= 500 && c < 600)
+                    .unwrap_or(false),
                 RetryCondition::ConnectionFailure => error.is_connection_failure,
                 RetryCondition::Reset => error.is_reset,
                 RetryCondition::Timeout => error.is_timeout,
                 RetryCondition::StatusCode(code) => {
                     error.status_code.map(|c| c == *code).unwrap_or(false)
                 }
-            }
-        });
+            });
 
         if !should_retry {
             return RetryResult::DoNotRetry;

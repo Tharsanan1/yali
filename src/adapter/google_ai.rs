@@ -131,7 +131,11 @@ impl ProtocolAdapter for GoogleAIAdapter {
             }
         }
 
-        if gen_config.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+        if gen_config
+            .as_object()
+            .map(|o| !o.is_empty())
+            .unwrap_or(false)
+        {
             google_request["generationConfig"] = gen_config;
         }
 
@@ -186,7 +190,8 @@ impl ProtocolAdapter for GoogleAIAdapter {
                     .and_then(|c| c.get("parts"))
                     .and_then(|p| p.as_array())
                     .and_then(|parts| {
-                        parts.iter()
+                        parts
+                            .iter()
                             .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
                             .collect::<Vec<_>>()
                             .first()

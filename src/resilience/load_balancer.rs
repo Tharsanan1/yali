@@ -94,8 +94,8 @@ impl LoadBalancer {
 
     /// Create a load balancer from a string algorithm name.
     pub fn from_algorithm_str(algorithm: &str) -> Self {
-        let algo = LoadBalancerAlgorithm::from_str(algorithm)
-            .unwrap_or(LoadBalancerAlgorithm::Failover);
+        let algo =
+            LoadBalancerAlgorithm::from_str(algorithm).unwrap_or(LoadBalancerAlgorithm::Failover);
         Self::new(algo)
     }
 

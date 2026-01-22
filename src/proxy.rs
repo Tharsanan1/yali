@@ -70,30 +70,10 @@ impl AIGatewayProxy {
         use serde_json::json;
 
         // Collect health information
-        let providers_count = self
-            .state
-            .providers
-            .read()
-            .map(|p| p.len())
-            .unwrap_or(0);
-        let backends_count = self
-            .state
-            .backends
-            .read()
-            .map(|b| b.len())
-            .unwrap_or(0);
-        let routes_count = self
-            .state
-            .routers
-            .read()
-            .map(|r| r.len())
-            .unwrap_or(0)
-            + self
-                .state
-                .default_router
-                .read()
-                .map(|_| 1)
-                .unwrap_or(0);
+        let providers_count = self.state.providers.read().map(|p| p.len()).unwrap_or(0);
+        let backends_count = self.state.backends.read().map(|b| b.len()).unwrap_or(0);
+        let routes_count = self.state.routers.read().map(|r| r.len()).unwrap_or(0)
+            + self.state.default_router.read().map(|_| 1).unwrap_or(0);
 
         let health_response = json!({
             "status": "healthy",
