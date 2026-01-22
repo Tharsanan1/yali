@@ -251,14 +251,17 @@ impl ProxyHttp for AIGatewayProxy {
         let request_id = ctx.request_id.clone();
 
         // Apply URL transformations
+        // NOTE: Currently `path_prefix` replaces the entire path rather than being a true prefix.
+        // This is intentional for simple proxy use cases where you want to route to a specific
+        // upstream endpoint (e.g., /v1/chat -> /v1/chat/completions on the provider).
+        // For more complex scenarios like stripping/replacing only the matched prefix,
+        // consider using `url.path_template` with placeholders instead.
         if let Some(path_prefix) = &adapter.url.path_prefix {
-            // The path_prefix replaces the entire path for now
-            // In the future, this could be more sophisticated to only replace the matched prefix
             debug!(
                 request_id = %request_id,
                 original_path = %original_path,
                 new_path = %path_prefix,
-                "Rewriting path with prefix"
+                "Rewriting path (path_prefix replaces entire path)"
             );
             upstream_request.set_uri(path_prefix.parse().map_err(|e| {
                 error!("Failed to parse URI: {}", e);

@@ -218,8 +218,8 @@ mod tests {
         assert!(router.at("/v1/chat/completions").is_ok(), "/v1/chat/completions should match");
         assert!(router.at("/v1/chat/").is_ok(), "/v1/chat/ should match");
         
-        // This might or might not match depending on matchit behavior
-        let exact_match = router.at("/v1/chat");
-        println!("/v1/chat match: {:?}", exact_match);
+        // /v1/chat (without trailing slash) doesn't match {*rest} pattern
+        // This is expected matchit behavior - {*rest} requires at least one character
+        assert!(router.at("/v1/chat").is_err(), "/v1/chat should not match {{*rest}} pattern");
     }
 }

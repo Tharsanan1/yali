@@ -162,11 +162,13 @@ async fn test_gateway_chat_completion_integration() {
 
     // Create config file
     let config_content = create_gateway_config(mock_llm_port);
-    let config_path = format!("/tmp/gateway_test_config_{}.json", gateway_port);
+    let temp_dir = std::env::temp_dir();
+    let config_path = temp_dir.join(format!("gateway_test_config_{}.json", gateway_port));
+    let config_path_str = config_path.to_string_lossy().to_string();
     std::fs::write(&config_path, &config_content).expect("Failed to write config file");
 
     // Start the gateway process
-    let mut gateway_process = start_gateway_process(&config_path, gateway_port);
+    let mut gateway_process = start_gateway_process(&config_path_str, gateway_port);
 
     // Wait for gateway to be ready
     let gateway_ready = wait_for_port(gateway_port, Duration::from_secs(10)).await;
@@ -299,11 +301,13 @@ async fn test_gateway_route_not_found() {
 
     // Create config file
     let config_content = create_gateway_config(mock_llm_port);
-    let config_path = format!("/tmp/gateway_test_config_404_{}.json", gateway_port);
+    let temp_dir = std::env::temp_dir();
+    let config_path = temp_dir.join(format!("gateway_test_config_404_{}.json", gateway_port));
+    let config_path_str = config_path.to_string_lossy().to_string();
     std::fs::write(&config_path, &config_content).expect("Failed to write config file");
 
     // Start the gateway process
-    let mut gateway_process = start_gateway_process(&config_path, gateway_port);
+    let mut gateway_process = start_gateway_process(&config_path_str, gateway_port);
 
     // Wait for gateway to be ready
     let gateway_ready = wait_for_port(gateway_port, Duration::from_secs(10)).await;
