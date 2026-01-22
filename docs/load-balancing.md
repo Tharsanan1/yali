@@ -229,9 +229,9 @@ Load balancing automatically considers provider health. Unhealthy providers are 
     "unhealthy_threshold": 3
   },
   "providers": [
-    {"ref": "provider_1", "priority": 1},
-    {"ref": "provider_2", "priority": 1},
-    {"ref": "provider_3", "priority": 1}
+    {"ref": "provider_1"},
+    {"ref": "provider_2"},
+    {"ref": "provider_3"}
   ]
 }
 ```

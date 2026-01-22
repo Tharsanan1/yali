@@ -92,7 +92,7 @@ A **Provider** represents a single AI endpoint.
 
 | Type | Description | Example |
 |------|-------------|---------|
-| `bearer` | Authorization: ****** | `{"type": "bearer", "secret_ref": "env://KEY"}` |
+| `bearer` | Authorization: Bearer \<token\> | `{"type": "bearer", "secret_ref": "env://KEY"}` |
 | `header` | Custom header | `{"type": "header", "key": "x-api-key", "secret_ref": "..."}` |
 | `query_param` | URL query parameter | `{"type": "query_param", "key": "key", "secret_ref": "..."}` |
 | `none` | No authentication | `{"type": "none"}` |
