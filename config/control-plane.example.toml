@@ -1,0 +1,7 @@
+bind = "0.0.0.0:8081"
+grpc_bind = "0.0.0.0:9090"
+database_url = "sqlite://config/control-plane.db"
+
+[logging]
+level = "info"
+json = true

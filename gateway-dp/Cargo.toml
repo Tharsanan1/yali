@@ -1,0 +1,11 @@
+[package]
+name = "gateway-dp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+figment = { workspace = true }
+thiserror = { workspace = true }
+
+# Placeholder: pingora, tracing, etc. will be added in later milestones.

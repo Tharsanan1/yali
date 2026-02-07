@@ -1,0 +1,7 @@
+[package]
+name = "policy-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Placeholder for wasmtime + ABI host implementations.

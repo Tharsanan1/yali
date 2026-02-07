@@ -1,0 +1,18 @@
+[workspace]
+members = [
+  "gateway-dp",
+  "gateway-cp",
+  "policy-sdk",
+  "policy-runtime",
+  "gateway-it",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+figment = { version = "0.10", features = ["env", "toml", "json"] }
+thiserror = "1"
