@@ -6,6 +6,7 @@ use axum::{
 };
 
 use crate::{db, model::RouteSpec};
+use tracing::info;
 
 use super::{ApiError, AppState, map_db_error};
 
@@ -14,6 +15,8 @@ pub async fn create_route(
     Json(route): Json<RouteSpec>,
 ) -> Result<impl IntoResponse, ApiError> {
     db::insert_route(&state.pool, &route).await.map_err(map_db_error)?;
+    state.config_state.publish_from_db(&state.pool).await.map_err(map_db_error)?;
+    info!(route_id = %route.id, "route created");
     Ok((StatusCode::CREATED, Json(route)))
 }
 
@@ -49,6 +52,8 @@ pub async fn update_route(
         return Err(ApiError::not_found("route not found"));
     }
 
+    state.config_state.publish_from_db(&state.pool).await.map_err(map_db_error)?;
+    info!(route_id = %route.id, "route updated");
     Ok(Json(route))
 }
 
@@ -61,5 +66,7 @@ pub async fn delete_route(
         return Err(ApiError::not_found("route not found"));
     }
 
+    state.config_state.publish_from_db(&state.pool).await.map_err(map_db_error)?;
+    info!(route_id = %id, "route deleted");
     Ok(StatusCode::NO_CONTENT)
 }

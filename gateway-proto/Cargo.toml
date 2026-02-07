@@ -1,0 +1,12 @@
+[package]
+name = "gateway-proto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+prost = "0.12"
+tonic = { version = "0.11", features = ["transport"] }
+
+[build-dependencies]
+tonic-build = "0.11"
+protoc-bin-vendored = "3.2.0"

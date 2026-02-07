@@ -13,9 +13,17 @@ thiserror = { workspace = true }
 [dev-dependencies]
 cucumber = { version = "0.20", features = ["macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+axum = "0.7"
+tonic = { version = "0.11", features = ["transport"] }
 
 [dependencies.gateway-cp]
 path = "../gateway-cp"
+
+[dev-dependencies.gateway-dp]
+path = "../gateway-dp"
+
+[dev-dependencies.gateway-proto]
+path = "../gateway-proto"
 
 [[test]]
 name = "cucumber"

@@ -14,6 +14,7 @@ mod routes;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: SqlitePool,
+    pub config_state: std::sync::Arc<crate::grpc::ConfigState>,
 }
 
 pub fn router(state: AppState) -> Router {

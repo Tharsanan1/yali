@@ -2,6 +2,7 @@
 members = [
   "gateway-dp",
   "gateway-cp",
+  "gateway-proto",
   "policy-sdk",
   "policy-runtime",
   "gateway-it",

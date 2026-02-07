@@ -1,6 +1,4 @@
-mod config;
-
-use config::GatewayDpConfig;
+use gateway_dp::GatewayDpConfig;
 
 fn main() {
     let config_path = std::env::var("GATEWAY_DP_CONFIG").unwrap_or_else(|_| "config/gateway.example.toml".to_string());
@@ -9,5 +7,5 @@ fn main() {
 
     println!("gateway-dp boot config loaded: {config:?}");
 
-    // Placeholder: initialize logging, Pingora listener, routing, and policy pipeline.
+    gateway_dp::run(config);
 }

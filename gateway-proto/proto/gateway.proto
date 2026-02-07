@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package gateway.config;
+
+service ConfigService {
+  rpc Subscribe(SubscribeRequest) returns (stream Snapshot);
+}
+
+message SubscribeRequest {
+  uint64 last_version = 1;
+}
+
+message Snapshot {
+  uint64 version = 1;
+  repeated Route routes = 2;
+}
+
+message Route {
+  string id = 1;
+  Match match = 2;
+  repeated Upstream upstreams = 3;
+  string lb = 4;
+  repeated PolicyRef policies = 5;
+}
+
+message Match {
+  string path_prefix = 1;
+  repeated string methods = 2;
+  string host = 3;
+}
+
+message Upstream {
+  string url = 1;
+  uint32 weight = 2;
+  uint32 priority = 3;
+}
+
+message PolicyRef {
+  string stage = 1;
+  string id = 2;
+  string version = 3;
+}

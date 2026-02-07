@@ -8,4 +8,16 @@ serde = { workspace = true }
 figment = { workspace = true }
 thiserror = { workspace = true }
 
-# Placeholder: pingora, tracing, etc. will be added in later milestones.
+async-trait = "0.1"
+arc-swap = "1"
+pingora = { version = "0.7", features = ["proxy"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+url = "2"
+tonic = { version = "0.11", features = ["transport"] }
+tokio-stream = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-appender = "0.2"
+
+[dependencies.gateway-proto]
+path = "../gateway-proto"

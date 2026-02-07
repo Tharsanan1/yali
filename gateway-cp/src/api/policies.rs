@@ -5,6 +5,7 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
+use tracing::info;
 
 use crate::{db, model::PolicySpec};
 
@@ -20,6 +21,8 @@ pub async fn create_policy(
     Json(policy): Json<PolicySpec>,
 ) -> Result<impl IntoResponse, ApiError> {
     db::insert_policy(&state.pool, &policy).await.map_err(map_db_error)?;
+    state.config_state.publish_from_db(&state.pool).await.map_err(map_db_error)?;
+    info!(policy_id = %policy.id, version = %policy.version, "policy created");
     Ok((StatusCode::CREATED, Json(policy)))
 }
 
