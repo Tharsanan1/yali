@@ -1,6 +1,6 @@
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt};
 use tracing_subscriber::Layer;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 pub fn init(level: &str, json: bool) {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
@@ -21,7 +21,11 @@ pub fn init(level: &str, json: bool) {
     };
 
     let fmt_layer = if json {
-        fmt::layer().json().with_target(true).with_writer(writer).boxed()
+        fmt::layer()
+            .json()
+            .with_target(true)
+            .with_writer(writer)
+            .boxed()
     } else {
         fmt::layer().with_target(true).with_writer(writer).boxed()
     };

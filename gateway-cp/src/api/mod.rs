@@ -20,38 +20,77 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
-        .route("/policies", post(policies::create_policy).get(policies::list_policies))
+        .route(
+            "/policies",
+            post(policies::create_policy).get(policies::list_policies),
+        )
         .route("/policies/:id", get(policies::get_policy))
-        .route("/routes", post(routes::create_route).get(routes::list_routes))
-        .route("/routes/:id", get(routes::get_route).put(routes::update_route).delete(routes::delete_route))
+        .route(
+            "/routes",
+            post(routes::create_route).get(routes::list_routes),
+        )
+        .route(
+            "/routes/:id",
+            get(routes::get_route)
+                .put(routes::update_route)
+                .delete(routes::delete_route),
+        )
         .with_state(state)
 }
 
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
-    message: String,
+    body: ApiErrorBody,
+}
+
+#[derive(Debug)]
+enum ApiErrorBody {
+    Message(String),
+    Validation { details: Vec<String> },
 }
 
 impl ApiError {
     fn not_found(message: &str) -> Self {
-        Self { status: StatusCode::NOT_FOUND, message: message.to_string() }
+        Self {
+            status: StatusCode::NOT_FOUND,
+            body: ApiErrorBody::Message(message.to_string()),
+        }
     }
 
     fn conflict(message: &str) -> Self {
-        Self { status: StatusCode::CONFLICT, message: message.to_string() }
+        Self {
+            status: StatusCode::CONFLICT,
+            body: ApiErrorBody::Message(message.to_string()),
+        }
+    }
+
+    fn validation(details: Vec<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            body: ApiErrorBody::Validation { details },
+        }
     }
 
     fn internal(message: &str) -> Self {
-        Self { status: StatusCode::INTERNAL_SERVER_ERROR, message: message.to_string() }
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: ApiErrorBody::Message(message.to_string()),
+        }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        let body = Json(serde_json::json!({
-            "error": self.message,
-        }));
+        let body = match self.body {
+            ApiErrorBody::Message(message) => Json(serde_json::json!({
+                "error": message,
+            })),
+            ApiErrorBody::Validation { details } => Json(serde_json::json!({
+                "error": "validation_error",
+                "details": details,
+            })),
+        };
         (self.status, body).into_response()
     }
 }

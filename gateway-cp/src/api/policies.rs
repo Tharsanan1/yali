@@ -7,9 +7,9 @@ use axum::{
 use serde::Deserialize;
 use tracing::info;
 
-use crate::{db, model::PolicySpec};
+use crate::{db, model::PolicySpec, service};
 
-use super::{ApiError, AppState, map_db_error};
+use super::{map_db_error, ApiError, AppState};
 
 #[derive(Deserialize)]
 pub(super) struct PolicyQuery {
@@ -20,15 +20,20 @@ pub async fn create_policy(
     State(state): State<AppState>,
     Json(policy): Json<PolicySpec>,
 ) -> Result<impl IntoResponse, ApiError> {
-    db::insert_policy(&state.pool, &policy).await.map_err(map_db_error)?;
-    state.config_state.publish_from_db(&state.pool).await.map_err(map_db_error)?;
+    service::validate_policy_spec(&policy).map_err(|err| ApiError::validation(err.details))?;
+    db::insert_policy(&state.pool, &policy)
+        .await
+        .map_err(map_db_error)?;
+    state
+        .config_state
+        .publish_from_db(&state.pool)
+        .await
+        .map_err(map_db_error)?;
     info!(policy_id = %policy.id, version = %policy.version, "policy created");
     Ok((StatusCode::CREATED, Json(policy)))
 }
 
-pub async fn list_policies(
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, ApiError> {
+pub async fn list_policies(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let policies = db::list_policies(&state.pool).await.map_err(map_db_error)?;
     Ok(Json(policies))
 }

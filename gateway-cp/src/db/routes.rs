@@ -5,8 +5,10 @@ use super::current_ts;
 
 pub async fn insert_route(pool: &SqlitePool, route: &RouteSpec) -> Result<(), sqlx::Error> {
     let match_json = serde_json::to_string(&route.match_rules).unwrap_or_else(|_| "{}".to_string());
-    let upstreams_json = serde_json::to_string(&route.upstreams).unwrap_or_else(|_| "[]".to_string());
-    let failover_json = serde_json::to_string(&route.failover).unwrap_or_else(|_| "null".to_string());
+    let upstreams_json =
+        serde_json::to_string(&route.upstreams).unwrap_or_else(|_| "[]".to_string());
+    let failover_json =
+        serde_json::to_string(&route.failover).unwrap_or_else(|_| "null".to_string());
     let policies_json = serde_json::to_string(&route.policies).unwrap_or_else(|_| "[]".to_string());
     let now = current_ts();
 
@@ -61,8 +63,10 @@ pub async fn get_route(pool: &SqlitePool, id: &str) -> Result<Option<RouteSpec>,
 
 pub async fn update_route(pool: &SqlitePool, route: &RouteSpec) -> Result<u64, sqlx::Error> {
     let match_json = serde_json::to_string(&route.match_rules).unwrap_or_else(|_| "{}".to_string());
-    let upstreams_json = serde_json::to_string(&route.upstreams).unwrap_or_else(|_| "[]".to_string());
-    let failover_json = serde_json::to_string(&route.failover).unwrap_or_else(|_| "null".to_string());
+    let upstreams_json =
+        serde_json::to_string(&route.upstreams).unwrap_or_else(|_| "[]".to_string());
+    let failover_json =
+        serde_json::to_string(&route.failover).unwrap_or_else(|_| "null".to_string());
     let policies_json = serde_json::to_string(&route.policies).unwrap_or_else(|_| "[]".to_string());
     let now = current_ts();
 
@@ -110,7 +114,8 @@ fn row_to_route(row: sqlx::sqlite::SqliteRow) -> Result<RouteSpec, sqlx::Error> 
     let failover_json: String = row.try_get("failover_json")?;
     let policies_json: String = row.try_get("policies_json")?;
 
-    let match_rules = serde_json::from_str(&match_json).unwrap_or(serde_json::Value::Object(Default::default()));
+    let match_rules =
+        serde_json::from_str(&match_json).unwrap_or(serde_json::Value::Object(Default::default()));
     let upstreams = serde_json::from_str(&upstreams_json).unwrap_or_default();
     let failover = serde_json::from_str(&failover_json).unwrap_or(None);
     let policies = serde_json::from_str(&policies_json).unwrap_or_default();

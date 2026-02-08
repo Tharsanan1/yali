@@ -16,7 +16,8 @@ pub fn run(config: GatewayDpConfig) {
     svc.add_tcp(&config.listener.bind);
     info!(bind = %config.listener.bind, "gateway-dp listening");
 
-    let cp_sync = crate::sync::CpSync::new(config.control_plane.grpc_endpoint.clone(), state.clone());
+    let cp_sync =
+        crate::sync::CpSync::new(config.control_plane.grpc_endpoint.clone(), state.clone());
     let bg = background_service("cp-sync", cp_sync);
 
     server.add_service(svc);
