@@ -18,6 +18,30 @@ pub enum PolicyRuntimeError {
         version: String,
         reason: String,
     },
+    #[error("failed to compile wasm component for {id}@{version}: {reason}")]
+    ComponentCompile {
+        id: String,
+        version: String,
+        reason: String,
+    },
+    #[error("failed to instantiate wasm component for {id}@{version}: {reason}")]
+    ComponentInstantiate {
+        id: String,
+        version: String,
+        reason: String,
+    },
+    #[error("guest policy execution failed for {id}@{version}: {reason}")]
+    GuestExecution {
+        id: String,
+        version: String,
+        reason: String,
+    },
+    #[error("policy guest rejected request for {id}@{version}: {reason}")]
+    GuestRejected {
+        id: String,
+        version: String,
+        reason: String,
+    },
     #[error("unknown policy: {id}@{version}")]
     UnknownPolicy { id: String, version: String },
     #[error("unsupported policy stage {stage} for {id}@{version}")]
@@ -32,8 +56,6 @@ pub enum PolicyRuntimeError {
         version: String,
         reason: String,
     },
-    #[error("unsupported policy for now: {id}")]
-    UnsupportedPolicy { id: String },
     #[error("policy decision uses unsupported action: {reason}")]
     UnsupportedDecisionAction { reason: String },
 }

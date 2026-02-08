@@ -84,20 +84,91 @@ Feature: WASM policy execution for add-header
       }
       """
 
-  Scenario: Unsupported policy executor fails closed with 500
+  Scenario: Any policy id can return generic header actions
     Given the control plane is running
     And an upstream service is running
     And the gateway is running
     When I POST "/policies" on the control plane with JSON:
       """
       {
-        "id": "rewrite-anything",
+        "id": "custom-header-policy",
+        "version": "2.0.0",
+        "wasm_uri": "{{policy_add_header_wasm_uri}}",
+        "sha256": "{{policy_add_header_sha256}}",
+        "supported_stages": ["pre_upstream"],
+        "config_schema": {
+          "type": "object",
+          "required": ["request_headers"],
+          "properties": {
+            "request_headers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "value", "overwrite"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "value": { "type": "string" },
+                  "overwrite": { "type": "boolean" }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "default_config": {
+          "request_headers": [
+            { "name": "x-custom-policy", "value": "yes", "overwrite": true }
+          ]
+        }
+      }
+      """
+    Then the response status should be 201
+    When I POST "/routes" on the control plane with JSON:
+      """
+      {
+        "id": "custom-policy-route",
+        "match": { "path_prefix": "/v1/custom-policy", "method": ["GET"] },
+        "upstreams": [
+          { "url": "{{upstream_url}}" }
+        ],
+        "policies": [
+          {
+            "stage": "pre_upstream",
+            "id": "custom-header-policy",
+            "version": "2.0.0",
+            "params": {}
+          }
+        ]
+      }
+      """
+    Then the response status should be 201
+    When I wait for the route "/v1/custom-policy" to be available
+    When I GET "/v1/custom-policy" on the gateway
+    Then the response status should be 200
+    When I GET "/debug/headers" on the upstream
+    Then the response status should be 200
+    And the JSON response should include:
+      """
+      {
+        "x-custom-policy": ["yes"]
+      }
+      """
+
+  Scenario: Invalid policy action payload fails closed with 500
+    Given the control plane is running
+    And an upstream service is running
+    And the gateway is running
+    When I POST "/policies" on the control plane with JSON:
+      """
+      {
+        "id": "bad-policy-payload",
         "version": "1.0.0",
         "wasm_uri": "{{policy_add_header_wasm_uri}}",
         "sha256": "{{policy_add_header_sha256}}",
         "supported_stages": ["pre_upstream"],
         "config_schema": { "type": "object" },
-        "default_config": {}
+        "default_config": { "request_headers": "not-an-array" }
       }
       """
     Then the response status should be 201
@@ -112,7 +183,7 @@ Feature: WASM policy execution for add-header
         "policies": [
           {
             "stage": "pre_upstream",
-            "id": "rewrite-anything",
+            "id": "bad-policy-payload",
             "version": "1.0.0",
             "params": {}
           }

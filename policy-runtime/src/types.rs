@@ -119,8 +119,3 @@ pub struct DirectResponse {
     #[serde(default)]
     pub body: Option<String>,
 }
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct AddHeaderConfig {
-    pub headers: Vec<HeaderMutation>,
-}

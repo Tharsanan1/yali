@@ -1,8 +1,11 @@
 SHELL := /bin/bash
 
-.PHONY: it-local it-local-build it-local-up it-local-test it-local-down
+.PHONY: it-local it-local-build it-local-up it-local-test it-local-down policy-build
 
-it-local-build:
+policy-build:
+	./scripts/build-policy-artifacts.sh
+
+it-local-build: policy-build
 	cargo build -p gateway-cp -p gateway-dp -p gateway-it
 
 it-local-up:

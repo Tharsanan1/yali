@@ -3,23 +3,51 @@ use std::sync::Arc;
 
 use reqwest::Url;
 use sha2::{Digest, Sha256};
+use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::{Config, Engine, Store};
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::errors::PolicyRuntimeError;
-use crate::types::{
-    AddHeaderConfig, PolicyArtifact, PolicyBinding, PolicyDecision, PolicyKey, PolicyStage,
-    RequestView,
-};
+use crate::types::{PolicyArtifact, PolicyBinding, PolicyDecision, PolicyKey, PolicyStage, RequestView};
 
-#[derive(Clone, Default)]
+wasmtime::component::bindgen!({
+    path: "../policy-sdk/wit",
+    world: "pre-upstream-policy",
+});
+
+#[derive(Clone)]
 pub struct PolicyEngine {
+    engine: Arc<Engine>,
     loaded: Arc<HashMap<PolicyKey, LoadedPolicy>>,
 }
 
 #[derive(Clone)]
 struct LoadedPolicy {
-    key: PolicyKey,
-    #[allow(dead_code)]
-    wasm_bytes: Arc<Vec<u8>>,
+    component: Arc<Component>,
+}
+
+struct PolicyStoreData {
+    table: ResourceTable,
+    wasi: WasiCtx,
+}
+
+impl WasiView for PolicyStoreData {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
+    }
+}
+
+impl Default for PolicyEngine {
+    fn default() -> Self {
+        let engine = create_engine().expect("failed to create wasmtime engine");
+        Self {
+            engine: Arc::new(engine),
+            loaded: Arc::new(HashMap::new()),
+        }
+    }
 }
 
 impl PolicyEngine {
@@ -28,6 +56,7 @@ impl PolicyEngine {
     }
 
     pub async fn preload(artifacts: &[PolicyArtifact]) -> Result<Self, PolicyRuntimeError> {
+        let engine = create_engine()?;
         let mut loaded = HashMap::new();
         for artifact in artifacts {
             let bytes = load_module_bytes(&artifact.wasm_uri).await?;
@@ -38,17 +67,23 @@ impl PolicyEngine {
                 }
             })?;
             validate_wasm_component(&artifact.key.id, &artifact.key.version, &bytes)?;
+            let component =
+                Component::new(&engine, &bytes).map_err(|err| PolicyRuntimeError::ComponentCompile {
+                    id: artifact.key.id.clone(),
+                    version: artifact.key.version.clone(),
+                    reason: err.to_string(),
+                })?;
 
             loaded.insert(
                 artifact.key.clone(),
                 LoadedPolicy {
-                    key: artifact.key.clone(),
-                    wasm_bytes: Arc::new(bytes),
+                    component: Arc::new(component),
                 },
             );
         }
 
         Ok(Self {
+            engine: Arc::new(engine),
             loaded: Arc::new(loaded),
         })
     }
@@ -56,7 +91,7 @@ impl PolicyEngine {
     pub fn evaluate_pre_upstream(
         &self,
         binding: &PolicyBinding,
-        _request: &RequestView,
+        request: &RequestView,
     ) -> Result<PolicyDecision, PolicyRuntimeError> {
         let loaded =
             self.loaded
@@ -74,34 +109,126 @@ impl PolicyEngine {
             });
         }
 
-        match loaded.key.id.as_str() {
-            "add-header" => evaluate_add_header(binding),
-            other => Err(PolicyRuntimeError::UnsupportedPolicy {
-                id: other.to_string(),
-            }),
-        }
-    }
-}
+        let mut linker = Linker::new(self.engine.as_ref());
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(|err| {
+            PolicyRuntimeError::ComponentInstantiate {
+                id: binding.key.id.clone(),
+                version: binding.key.version.clone(),
+                reason: format!("failed to link wasi imports: {err}"),
+            }
+        })?;
 
-fn evaluate_add_header(binding: &PolicyBinding) -> Result<PolicyDecision, PolicyRuntimeError> {
-    let parsed: AddHeaderConfig = serde_json::from_value(binding.effective_config.clone())
-        .map_err(|err| PolicyRuntimeError::InvalidConfig {
+        let mut store = Store::new(
+            self.engine.as_ref(),
+            PolicyStoreData {
+                table: ResourceTable::new(),
+                wasi: WasiCtxBuilder::new().build(),
+            },
+        );
+        let bindings = PreUpstreamPolicy::instantiate(
+            &mut store,
+            loaded.component.as_ref(),
+            &linker,
+        )
+        .map_err(|err: wasmtime::Error| PolicyRuntimeError::ComponentInstantiate {
             id: binding.key.id.clone(),
             version: binding.key.version.clone(),
             reason: err.to_string(),
         })?;
 
-    if parsed.headers.is_empty() {
-        return Err(PolicyRuntimeError::InvalidConfig {
+        let headers_json = serde_json::to_string(&request.headers).map_err(|err| {
+            PolicyRuntimeError::GuestExecution {
+                id: binding.key.id.clone(),
+                version: binding.key.version.clone(),
+                reason: format!("failed to serialize request headers: {err}"),
+            }
+        })?;
+        let effective_config_json =
+            serde_json::to_string(&binding.effective_config).map_err(|err| {
+                PolicyRuntimeError::GuestExecution {
+                    id: binding.key.id.clone(),
+                    version: binding.key.version.clone(),
+                    reason: format!("failed to serialize effective config: {err}"),
+                }
+            })?;
+
+        let guest_result: Result<yali::policy::types::PolicyDecision, String> = bindings
+            .yali_policy_policy()
+            .call_evaluate_pre_upstream(
+                &mut store,
+                &request.method,
+                &request.path,
+                request.host.as_deref(),
+                &headers_json,
+                &effective_config_json,
+            )
+            .map_err(|err: wasmtime::Error| PolicyRuntimeError::GuestExecution {
+                id: binding.key.id.clone(),
+                version: binding.key.version.clone(),
+                reason: err.to_string(),
+            })?;
+
+        let decision = guest_result.map_err(|reason| PolicyRuntimeError::GuestRejected {
             id: binding.key.id.clone(),
             version: binding.key.version.clone(),
-            reason: "headers must not be empty".to_string(),
-        });
-    }
+            reason,
+        })?;
 
-    Ok(PolicyDecision {
-        request_headers: parsed.headers,
-        ..PolicyDecision::default()
+        Ok(component_decision_to_runtime(decision))
+    }
+}
+
+fn component_decision_to_runtime(decision: yali::policy::types::PolicyDecision) -> PolicyDecision {
+    PolicyDecision {
+        request_headers: decision
+            .request_headers
+            .into_iter()
+            .map(component_header_to_runtime)
+            .collect(),
+        request_rewrite: decision
+            .request_rewrite
+            .map(|rewrite| crate::types::RequestRewrite {
+                method: rewrite.method,
+                path: rewrite.path,
+            }),
+        upstream_hint: decision.upstream_hint,
+        direct_response: decision
+            .direct_response
+            .map(|response| crate::types::DirectResponse {
+                status: response.status,
+                headers: response
+                    .headers
+                    .into_iter()
+                    .map(component_header_to_runtime)
+                    .collect(),
+                body: response.body,
+            }),
+        request_body_patch: decision
+            .request_body_patch_json
+            .and_then(|raw| serde_json::from_str(&raw).ok()),
+        response_headers: decision
+            .response_headers
+            .into_iter()
+            .map(component_header_to_runtime)
+            .collect(),
+    }
+}
+
+fn component_header_to_runtime(header: yali::policy::types::HeaderOp) -> crate::types::HeaderMutation {
+    crate::types::HeaderMutation {
+        name: header.name,
+        value: header.value,
+        overwrite: header.overwrite,
+    }
+}
+
+fn create_engine() -> Result<Engine, PolicyRuntimeError> {
+    let mut config = Config::new();
+    config.wasm_component_model(true);
+    Engine::new(&config).map_err(|err| PolicyRuntimeError::ComponentCompile {
+        id: "engine".to_string(),
+        version: "n/a".to_string(),
+        reason: err.to_string(),
     })
 }
 

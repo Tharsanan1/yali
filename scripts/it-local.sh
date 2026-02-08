@@ -111,6 +111,7 @@ build_binaries() {
     return 0
   fi
 
+  "${ROOT_DIR}/scripts/build-policy-artifacts.sh"
   cargo build -p gateway-cp -p gateway-dp -p gateway-it
 }
 

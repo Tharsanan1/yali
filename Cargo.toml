@@ -6,6 +6,7 @@ members = [
   "policy-sdk",
   "policy-runtime",
   "gateway-it",
+  "policies/add-header",
 ]
 resolver = "2"
 

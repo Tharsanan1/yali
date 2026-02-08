@@ -10,9 +10,9 @@ Today, the control plane and data plane behave as follows:
 - Routes attach policies with per-route `params`.
 - Effective config is `deep_merge(default_config, params)` and is sent to DP over gRPC.
 - Data plane (`gateway-dp`) loads policy artifacts (`wasm_uri`, `sha256`) and validates module bytes.
-- Policy execution is currently host-dispatched by policy `id` in `policy-runtime/src/engine.rs` (for example, `add-header`).
+- Data plane executes attached policies in route order and parses generic policy actions from effective config (`request_headers`, `request_rewrite`, `upstream_hint`, `direct_response`, `request_body_patch`, `response_headers`).
 
-Important: the WIT contract exists at `policy-sdk/wit/policy.wit`, but policy logic is not yet executed through Component Model bindings in runtime. To add a new policy now, add a new host-side evaluator branch.
+Important: the WIT contract exists at `policy-sdk/wit/policy.wit`, but runtime is not yet invoking guest policy code through Component Model bindings. Current execution is host-side action interpretation with fail-closed behavior.
 
 ## 1) Define the Policy Contract
 
@@ -45,22 +45,22 @@ Example registration payload:
 }
 ```
 
-## 2) Implement the Policy in DP Runtime
+## 2) Define Policy Actions in Effective Config
 
-Add parsing and execution in `policy-runtime`:
+Use `default_config` + route `params` to produce effective action payload. Supported action fields:
 
-1. Add config type(s) in `policy-runtime/src/types.rs`.
-2. Add evaluator function in `policy-runtime/src/engine.rs`.
-3. Register it in the `match loaded.key.id.as_str()` branch in `evaluate_pre_upstream`.
-4. Return a `PolicyDecision` using generic actions:
-   - `request_headers`
-   - `request_rewrite`
-   - `upstream_hint`
-   - `direct_response`
-   - `request_body_patch`
-   - `response_headers`
+- `request_headers`
+- `request_rewrite`
+- `upstream_hint`
+- `direct_response`
+- `request_body_patch`
+- `response_headers`
 
-If the policy is not supported or config is invalid, return an error. DP is fail-closed (request returns `500`).
+Compatibility alias:
+
+- `headers` is accepted as alias of `request_headers`.
+
+If effective config cannot be parsed into valid actions, DP fails closed (request returns `500`).
 
 ## 3) Provide a Policy Artifact
 
@@ -102,7 +102,11 @@ Attach to route (`params` overrides `default_config`):
       "stage": "pre_upstream",
       "id": "my-policy",
       "version": "1.0.0",
-      "params": { "message": "from-route" }
+      "params": {
+        "request_headers": [
+          { "name": "x-my-policy", "value": "applied", "overwrite": true }
+        ]
+      }
     }
   ]
 }
