@@ -3,6 +3,8 @@ mod select;
 
 use std::sync::{atomic::AtomicUsize, Arc};
 
+use crate::policy::types::PolicyBinding;
+
 pub use matcher::match_route;
 pub use select::select_upstream;
 
@@ -19,6 +21,7 @@ pub struct Route {
     pub methods: Vec<String>,
     pub host: Option<String>,
     pub upstreams: Vec<Upstream>,
+    pub policies: Vec<PolicyBinding>,
     pub rr_index: Arc<AtomicUsize>,
 }
 
@@ -43,6 +46,7 @@ impl RouteSnapshot {
                 upstreams: vec![Upstream {
                     url: "http://127.0.0.1:9000".to_string(),
                 }],
+                policies: Vec::new(),
                 rr_index: Arc::new(AtomicUsize::new(0)),
             }],
         }
@@ -56,6 +60,7 @@ impl Route {
         methods: Vec<String>,
         host: Option<String>,
         upstreams: Vec<Upstream>,
+        policies: Vec<PolicyBinding>,
     ) -> Self {
         Self {
             id,
@@ -63,6 +68,7 @@ impl Route {
             methods,
             host,
             upstreams,
+            policies,
             rr_index: Arc::new(AtomicUsize::new(0)),
         }
     }

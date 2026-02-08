@@ -1,12 +1,20 @@
-use crate::{config::GatewayDpConfig, proxy::GatewayProxy, router::RouteSnapshot, state::State};
+use crate::{
+    config::GatewayDpConfig,
+    policy::PolicyRegistry,
+    proxy::GatewayProxy,
+    router::RouteSnapshot,
+    state::{RuntimeSnapshot, State},
+};
 use pingora::prelude::*;
 use std::sync::Arc;
 use tracing::info;
 
 pub fn run(config: GatewayDpConfig) {
     crate::logging::init(&config.logging.level, config.logging.json);
-    let snapshot = RouteSnapshot::empty();
-    let state = Arc::new(State::new(snapshot));
+    let state = Arc::new(State::new(RuntimeSnapshot {
+        routes: RouteSnapshot::empty(),
+        policies: PolicyRegistry::empty(),
+    }));
     let proxy = GatewayProxy::new(state.clone());
 
     let mut server = Server::new(None).unwrap();

@@ -1,6 +1,7 @@
 use cucumber::gherkin::Step;
 use cucumber::{given, then, when, World};
 use reqwest::Method;
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 #[derive(Default, World)]
@@ -10,6 +11,8 @@ struct TestWorld {
     dp_base: String,
     upstream_url: String,
     upstream_check_url: Option<String>,
+    policy_add_header_wasm_uri: String,
+    policy_add_header_sha256: String,
     client: reqwest::Client,
     last_status: Option<u16>,
     last_body: Option<serde_json::Value>,
@@ -34,6 +37,17 @@ impl TestWorld {
         let upstream_url = std::env::var("GATEWAY_IT_UPSTREAM_URL")
             .map_err(|_| anyhow::anyhow!("GATEWAY_IT_UPSTREAM_URL is required"))?;
         let upstream_check_url = std::env::var("GATEWAY_IT_UPSTREAM_CHECK_URL").ok();
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("failed to resolve workspace root"))?
+            .to_path_buf();
+        let policy_path = workspace_root
+            .join("policies")
+            .join("add-header")
+            .join("add-header.wasm");
+        let policy_add_header_wasm_uri = format!("file://{}", policy_path.display());
+        let policy_bytes = std::fs::read(&policy_path)?;
+        let policy_add_header_sha256 = hex::encode(Sha256::digest(&policy_bytes));
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(3000))
@@ -44,6 +58,8 @@ impl TestWorld {
             dp_base,
             upstream_url,
             upstream_check_url,
+            policy_add_header_wasm_uri,
+            policy_add_header_sha256,
             client,
             ..Self::default()
         })
@@ -72,7 +88,7 @@ async fn upstream_running(world: &mut TestWorld) {
 #[when(expr = "I {word} {string} on the control plane")]
 async fn request_on_control_plane(world: &mut TestWorld, method: String, path: String) {
     let cp_base = world.cp_base.clone();
-    send_request(world, &cp_base, &method, &path, None).await;
+    send_request(world, &cp_base, &method, &path, None, None).await;
 }
 
 #[when(expr = "I {word} {string} on the control plane with JSON:")]
@@ -84,13 +100,19 @@ async fn request_on_control_plane_with_json(
 ) {
     let body = json_from_docstring(world, step);
     let cp_base = world.cp_base.clone();
-    send_request(world, &cp_base, &method, &path, Some(body)).await;
+    send_request(world, &cp_base, &method, &path, Some(body), None).await;
 }
 
 #[when(expr = "I {word} {string} on the gateway")]
 async fn request_on_gateway(world: &mut TestWorld, method: String, path: String) {
     let dp_base = world.dp_base.clone();
-    send_request(world, &dp_base, &method, &path, None).await;
+    send_request(world, &dp_base, &method, &path, None, None).await;
+}
+
+#[when(expr = "I {word} {string} on the upstream")]
+async fn request_on_upstream(world: &mut TestWorld, method: String, path: String) {
+    let upstream_base = world.upstream_url.clone();
+    send_request(world, &upstream_base, &method, &path, None, None).await;
 }
 
 #[when(expr = "I {word} {string} on the gateway with JSON:")]
@@ -102,7 +124,30 @@ async fn request_on_gateway_with_json(
 ) {
     let body = json_from_docstring(world, step);
     let dp_base = world.dp_base.clone();
-    send_request(world, &dp_base, &method, &path, Some(body)).await;
+    send_request(world, &dp_base, &method, &path, Some(body), None).await;
+}
+
+#[when(expr = "I {word} {string} on the gateway with headers:")]
+async fn request_on_gateway_with_headers(
+    world: &mut TestWorld,
+    method: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let headers = json_from_docstring(world, step);
+    let headers = headers
+        .as_object()
+        .unwrap_or_else(|| panic!("headers docstring must be a JSON object"))
+        .iter()
+        .map(|(name, value)| {
+            let value = value
+                .as_str()
+                .unwrap_or_else(|| panic!("header value for {name} must be string"));
+            (name.clone(), value.to_string())
+        })
+        .collect::<Vec<_>>();
+    let dp_base = world.dp_base.clone();
+    send_request(world, &dp_base, &method, &path, None, Some(headers)).await;
 }
 
 #[when(expr = "I wait for the route {string} to be available")]
@@ -171,6 +216,7 @@ async fn send_request(
     method: &str,
     path: &str,
     body: Option<serde_json::Value>,
+    headers: Option<Vec<(String, String)>>,
 ) {
     let url = format!("{base_url}{path}");
     let method = Method::from_bytes(method.to_uppercase().as_bytes())
@@ -178,6 +224,11 @@ async fn send_request(
     let mut request = world.client.request(method, &url);
     if let Some(json_body) = body {
         request = request.json(&json_body);
+    }
+    if let Some(headers) = headers {
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
     }
 
     let response = request.send().await.expect("request failed");
@@ -204,6 +255,14 @@ fn render_docstring(world: &TestWorld, raw: &str) -> String {
     raw.replace("{{upstream_url}}", &world.upstream_url)
         .replace("{{control_plane}}", &world.cp_base)
         .replace("{{gateway}}", &world.dp_base)
+        .replace(
+            "{{policy_add_header_wasm_uri}}",
+            &world.policy_add_header_wasm_uri,
+        )
+        .replace(
+            "{{policy_add_header_sha256}}",
+            &world.policy_add_header_sha256,
+        )
 }
 
 fn json_contains(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {

@@ -9,8 +9,10 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
+use crate::policy::types::{PolicyArtifact, PolicyBinding, PolicyKey, PolicyStage};
+use crate::policy::PolicyRegistry;
 use crate::router::{Route, RouteSnapshot, Upstream};
-use crate::state::State;
+use crate::state::{RuntimeSnapshot, State};
 
 pub struct CpSync {
     endpoint: String,
@@ -37,9 +39,9 @@ impl CpSync {
                 routes = route_count,
                 "received config snapshot"
             );
-            let new_snapshot = snapshot_to_routes(snapshot);
+            let new_snapshot = snapshot_to_runtime(snapshot).await?;
             debug!(
-                routes = new_snapshot.routes.len(),
+                routes = new_snapshot.routes.routes.len(),
                 "applying config snapshot"
             );
             self.state.update(new_snapshot);
@@ -67,40 +69,84 @@ impl BackgroundService for CpSync {
     }
 }
 
-fn snapshot_to_routes(snapshot: Snapshot) -> RouteSnapshot {
+async fn snapshot_to_runtime(
+    snapshot: Snapshot,
+) -> Result<RuntimeSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let artifacts = snapshot
+        .policy_artifacts
+        .into_iter()
+        .map(|artifact| PolicyArtifact {
+            key: PolicyKey::new(artifact.id, artifact.version),
+            wasm_uri: artifact.wasm_uri,
+            sha256: artifact.sha256,
+        })
+        .collect::<Vec<_>>();
+    let policies = PolicyRegistry::preload(&artifacts).await?;
+
     let routes = snapshot
         .routes
         .into_iter()
-        .map(|route| {
-            let path_prefix = route.r#match.as_ref().and_then(|m| {
-                if m.path_prefix.is_empty() {
-                    None
-                } else {
-                    Some(m.path_prefix.clone())
-                }
-            });
-            let methods = route
-                .r#match
-                .as_ref()
-                .map(|m| m.methods.clone())
-                .unwrap_or_default();
-            let host = route.r#match.as_ref().and_then(|m| {
-                if m.host.is_empty() {
-                    None
-                } else {
-                    Some(m.host.clone())
-                }
-            });
+        .map(
+            |route| -> Result<Route, Box<dyn std::error::Error + Send + Sync>> {
+                let path_prefix = route.r#match.as_ref().and_then(|m| {
+                    if m.path_prefix.is_empty() {
+                        None
+                    } else {
+                        Some(m.path_prefix.clone())
+                    }
+                });
+                let methods = route
+                    .r#match
+                    .as_ref()
+                    .map(|m| m.methods.clone())
+                    .unwrap_or_default();
+                let host = route.r#match.as_ref().and_then(|m| {
+                    if m.host.is_empty() {
+                        None
+                    } else {
+                        Some(m.host.clone())
+                    }
+                });
 
-            let upstreams = route
-                .upstreams
-                .into_iter()
-                .map(|u| Upstream { url: u.url })
-                .collect();
+                let upstreams = route
+                    .upstreams
+                    .into_iter()
+                    .map(|u| Upstream { url: u.url })
+                    .collect();
 
-            Route::new(route.id, path_prefix, methods, host, upstreams)
-        })
-        .collect();
+                let route_policies = route
+                    .policies
+                    .into_iter()
+                    .map(|policy| {
+                        let stage = policy
+                            .stage
+                            .parse::<PolicyStage>()
+                            .map_err(|err| format!("invalid stage {}: {err}", policy.stage))?;
+                        let effective_config = serde_json::from_str(&policy.effective_config_json)
+                            .map_err(|err| format!("invalid effective_config_json: {err}"))?;
+                        Ok::<PolicyBinding, String>(PolicyBinding {
+                            stage,
+                            key: PolicyKey::new(policy.id, policy.version),
+                            effective_config,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { err.into() })?;
 
-    RouteSnapshot { routes }
+                Ok(Route::new(
+                    route.id,
+                    path_prefix,
+                    methods,
+                    host,
+                    upstreams,
+                    route_policies,
+                ))
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(RuntimeSnapshot {
+        routes: RouteSnapshot { routes },
+        policies,
+    })
 }

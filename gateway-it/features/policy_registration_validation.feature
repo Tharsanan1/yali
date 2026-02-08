@@ -7,8 +7,8 @@ Feature: Policy registration validation
       {
         "id": "authn-schema-valid",
         "version": "1.0.0",
-        "wasm_uri": "file:///policies/authn.wasm",
-        "sha256": "deadbeef",
+        "wasm_uri": "{{policy_add_header_wasm_uri}}",
+        "sha256": "{{policy_add_header_sha256}}",
         "supported_stages": ["pre_route"],
         "config_schema": {
           "type": "object",
@@ -36,8 +36,8 @@ Feature: Policy registration validation
       {
         "id": "authn-schema-invalid",
         "version": "1.0.0",
-        "wasm_uri": "file:///policies/authn.wasm",
-        "sha256": "deadbeef",
+        "wasm_uri": "{{policy_add_header_wasm_uri}}",
+        "sha256": "{{policy_add_header_sha256}}",
         "config_schema": {
           "type": 42
         },
@@ -57,8 +57,8 @@ Feature: Policy registration validation
       {
         "id": "authn-defaults-invalid",
         "version": "1.0.0",
-        "wasm_uri": "file:///policies/authn.wasm",
-        "sha256": "deadbeef",
+        "wasm_uri": "{{policy_add_header_wasm_uri}}",
+        "sha256": "{{policy_add_header_sha256}}",
         "config_schema": {
           "type": "object",
           "required": ["required_scopes"],

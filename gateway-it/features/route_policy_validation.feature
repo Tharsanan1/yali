@@ -33,8 +33,8 @@ Feature: Route policy validation
       {
         "id": "authn-stage-check",
         "version": "1.0.0",
-        "wasm_uri": "file:///policies/authn.wasm",
-        "sha256": "deadbeef",
+        "wasm_uri": "{{policy_add_header_wasm_uri}}",
+        "sha256": "{{policy_add_header_sha256}}",
         "supported_stages": ["pre_route"],
         "config_schema": { "type": "object" },
         "default_config": {}
@@ -72,8 +72,8 @@ Feature: Route policy validation
       {
         "id": "authn-secret-policy",
         "version": "1.0.0",
-        "wasm_uri": "file:///policies/authn.wasm",
-        "sha256": "deadbeef",
+        "wasm_uri": "{{policy_add_header_wasm_uri}}",
+        "sha256": "{{policy_add_header_sha256}}",
         "supported_stages": ["pre_route"],
         "config_schema": {
           "type": "object",
@@ -129,8 +129,8 @@ Feature: Route policy validation
       {
         "id": "authn-secret-policy-valid",
         "version": "1.0.0",
-        "wasm_uri": "file:///policies/authn.wasm",
-        "sha256": "deadbeef",
+        "wasm_uri": "{{policy_add_header_wasm_uri}}",
+        "sha256": "{{policy_add_header_sha256}}",
         "supported_stages": ["pre_route"],
         "config_schema": {
           "type": "object",
@@ -182,8 +182,8 @@ Feature: Route policy validation
       {
         "id": "authn-update-policy",
         "version": "1.0.0",
-        "wasm_uri": "file:///policies/authn.wasm",
-        "sha256": "deadbeef",
+        "wasm_uri": "{{policy_add_header_wasm_uri}}",
+        "sha256": "{{policy_add_header_sha256}}",
         "supported_stages": ["pre_route"],
         "config_schema": {
           "type": "object",

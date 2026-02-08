@@ -7,8 +7,8 @@ Feature: Control plane routes and policies
       {
         "id": "authn",
         "version": "1.0.0",
-        "wasm_uri": "file:///policies/authn.wasm",
-        "sha256": "deadbeef",
+        "wasm_uri": "{{policy_add_header_wasm_uri}}",
+        "sha256": "{{policy_add_header_sha256}}",
         "config": { "mode": "jwt", "issuer": "example" }
       }
       """

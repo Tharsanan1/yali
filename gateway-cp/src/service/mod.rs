@@ -1,4 +1,4 @@
-mod merge;
+pub mod merge;
 mod policies;
 mod routes;
 mod validation;

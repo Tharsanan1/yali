@@ -7,8 +7,8 @@ Feature: Route policy config merge semantics
       {
         "id": "authn-merge-nested",
         "version": "1.0.0",
-        "wasm_uri": "file:///policies/authn.wasm",
-        "sha256": "deadbeef",
+        "wasm_uri": "{{policy_add_header_wasm_uri}}",
+        "sha256": "{{policy_add_header_sha256}}",
         "supported_stages": ["pre_route"],
         "config_schema": {
           "type": "object",
@@ -70,8 +70,8 @@ Feature: Route policy config merge semantics
       {
         "id": "authn-merge-array",
         "version": "1.0.0",
-        "wasm_uri": "file:///policies/authn.wasm",
-        "sha256": "deadbeef",
+        "wasm_uri": "{{policy_add_header_wasm_uri}}",
+        "sha256": "{{policy_add_header_sha256}}",
         "supported_stages": ["pre_route"],
         "config_schema": {
           "type": "object",

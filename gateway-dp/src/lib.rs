@@ -2,6 +2,7 @@ pub mod config;
 
 mod app;
 mod logging;
+mod policy;
 mod proxy;
 mod router;
 mod state;

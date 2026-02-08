@@ -1,0 +1,45 @@
+package yali:policy@1.0.0;
+
+interface types {
+  record header-op {
+    name: string,
+    value: string,
+    overwrite: bool,
+  }
+
+  record request-rewrite {
+    method: option<string>,
+    path: option<string>,
+  }
+
+  record direct-response {
+    status: u16,
+    body: option<string>,
+    headers: list<header-op>,
+  }
+
+  record policy-decision {
+    request-headers: list<header-op>,
+    request-rewrite: option<request-rewrite>,
+    upstream-hint: option<string>,
+    direct-response: option<direct-response>,
+    request-body-patch-json: option<string>,
+    response-headers: list<header-op>,
+  }
+}
+
+interface policy {
+  use types.{policy-decision};
+
+  evaluate-pre-upstream: func(
+    method: string,
+    path: string,
+    host: option<string>,
+    headers-json: string,
+    effective-config-json: string
+  ) -> result<policy-decision, string>;
+}
+
+world pre-upstream-policy {
+  export policy;
+}

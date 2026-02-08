@@ -13,6 +13,7 @@ message SubscribeRequest {
 message Snapshot {
   uint64 version = 1;
   repeated Route routes = 2;
+  repeated PolicyArtifact policy_artifacts = 3;
 }
 
 message Route {
@@ -20,7 +21,7 @@ message Route {
   Match match = 2;
   repeated Upstream upstreams = 3;
   string lb = 4;
-  repeated PolicyRef policies = 5;
+  repeated PolicyBinding policies = 5;
 }
 
 message Match {
@@ -35,8 +36,16 @@ message Upstream {
   uint32 priority = 3;
 }
 
-message PolicyRef {
+message PolicyBinding {
   string stage = 1;
   string id = 2;
   string version = 3;
+  string effective_config_json = 4;
+}
+
+message PolicyArtifact {
+  string id = 1;
+  string version = 2;
+  string wasm_uri = 3;
+  string sha256 = 4;
 }

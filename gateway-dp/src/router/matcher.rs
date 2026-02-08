@@ -112,6 +112,7 @@ mod tests {
             vec![Upstream {
                 url: "http://127.0.0.1:9000".to_string(),
             }],
+            Vec::new(),
         )
     }
 
