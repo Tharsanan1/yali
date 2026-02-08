@@ -5,6 +5,7 @@ A Rust gateway based on Pingora, designed for high performance and long-term ext
 **Architecture Overview**
 
 See `docs/architecture.md` for the full diagram and data/control plane flow.
+See `docs/policy-authoring.md` for custom policy authoring and integration testing.
 
 **Crates**
 - `gateway-dp` Data plane. Pingora listener, routing, policy stages.
