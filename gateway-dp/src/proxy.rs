@@ -86,8 +86,12 @@ fn build_peer(upstream: &router::Upstream) -> Result<HttpPeer> {
     };
     let tls = matches!(url.scheme(), "https");
 
-    let host = url.host_str().ok_or_else(|| Error::new(ErrorType::Custom("invalid upstream host")))?;
-    let port = url.port_or_known_default().ok_or_else(|| Error::new(ErrorType::Custom("invalid upstream port")))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| Error::new(ErrorType::Custom("invalid upstream host")))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| Error::new(ErrorType::Custom("invalid upstream port")))?;
     let addr = format!("{host}:{port}");
 
     Ok(HttpPeer::new(addr, tls, host.to_string()))

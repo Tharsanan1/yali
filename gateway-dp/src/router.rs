@@ -40,7 +40,9 @@ impl RouteSnapshot {
                 path_prefix: Some("/".to_string()),
                 methods: vec!["GET".to_string()],
                 host: None,
-                upstreams: vec![Upstream { url: "http://127.0.0.1:9000".to_string() }],
+                upstreams: vec![Upstream {
+                    url: "http://127.0.0.1:9000".to_string(),
+                }],
                 rr_index: Arc::new(AtomicUsize::new(0)),
             }],
         }

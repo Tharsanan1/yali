@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use gateway_proto::config::config_service_client::ConfigServiceClient;
 use gateway_proto::config::{Snapshot, SubscribeRequest};
 use pingora::prelude::*;
-use pingora::services::background::BackgroundService;
 use pingora::server::ShutdownWatch;
+use pingora::services::background::BackgroundService;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -32,9 +32,16 @@ impl CpSync {
 
         while let Some(snapshot) = stream.message().await? {
             let route_count = snapshot.routes.len();
-            debug!(version = snapshot.version, routes = route_count, "received config snapshot");
+            debug!(
+                version = snapshot.version,
+                routes = route_count,
+                "received config snapshot"
+            );
             let new_snapshot = snapshot_to_routes(snapshot);
-            debug!(routes = new_snapshot.routes.len(), "applying config snapshot");
+            debug!(
+                routes = new_snapshot.routes.len(),
+                "applying config snapshot"
+            );
             self.state.update(new_snapshot);
         }
 
@@ -65,19 +72,25 @@ fn snapshot_to_routes(snapshot: Snapshot) -> RouteSnapshot {
         .routes
         .into_iter()
         .map(|route| {
-            let path_prefix = route
-                .r#match
-                .as_ref()
-                .and_then(|m| if m.path_prefix.is_empty() { None } else { Some(m.path_prefix.clone()) });
+            let path_prefix = route.r#match.as_ref().and_then(|m| {
+                if m.path_prefix.is_empty() {
+                    None
+                } else {
+                    Some(m.path_prefix.clone())
+                }
+            });
             let methods = route
                 .r#match
                 .as_ref()
                 .map(|m| m.methods.clone())
                 .unwrap_or_default();
-            let host = route
-                .r#match
-                .as_ref()
-                .and_then(|m| if m.host.is_empty() { None } else { Some(m.host.clone()) });
+            let host = route.r#match.as_ref().and_then(|m| {
+                if m.host.is_empty() {
+                    None
+                } else {
+                    Some(m.host.clone())
+                }
+            });
 
             let upstreams = route
                 .upstreams
