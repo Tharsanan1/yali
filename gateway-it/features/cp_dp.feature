@@ -4,7 +4,19 @@ Feature: Control plane to data plane routing
     Given the control plane is running
     And an upstream service is running
     And the gateway is running
-    When I create a route pointing to the upstream
+    When I POST "/routes" on the control plane with JSON:
+      """
+      {
+        "id": "users",
+        "match": { "path_prefix": "/v1/users", "method": ["GET"] },
+        "upstreams": [
+          { "url": "{{upstream_url}}" }
+        ],
+        "policies": []
+      }
+      """
     Then the response status should be 201
     When I wait for the route "/v1/users" to be available
-    Then a request to "/v1/users" should return "upstream-ok"
+    When I GET "/v1/users" on the gateway
+    Then the response status should be 200
+    And the response text should be "upstream-ok"

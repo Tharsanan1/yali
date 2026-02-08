@@ -1,10 +1,10 @@
 use axum::{routing::get, Router};
+use cucumber::gherkin::Step;
 use cucumber::{given, then, when, World};
 use gateway_cp::RunningServer;
 use gateway_dp::GatewayDpConfig;
-use serde_json::json;
-use std::net::{SocketAddr, TcpListener};
-use std::net::TcpStream;
+use reqwest::Method;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 use std::{path::PathBuf, time::SystemTime};
@@ -72,82 +72,6 @@ async fn upstream_running(world: &mut TestWorld) {
     world.upstream_addr = Some(addr);
 }
 
-#[when(expr = "I register a policy with id {string} and version {string}")]
-async fn register_policy(world: &mut TestWorld, id: String, version: String) {
-    let server = world.server.as_ref().expect("server not running");
-    let body = json!({
-        "id": id,
-        "version": version,
-        "wasm_uri": "file:///policies/authn.wasm",
-        "sha256": "deadbeef",
-        "config": { "mode": "jwt", "issuer": "example" }
-    });
-
-    let response = world
-        .client
-        .post(format!("{}/policies", server.base_url))
-        .json(&body)
-        .send()
-        .await
-        .expect("failed to call /policies");
-
-    world.last_status = Some(response.status().as_u16());
-    world.last_body = response.json().await.ok();
-}
-
-#[when(expr = "I create a route with id {string}")]
-async fn create_route(world: &mut TestWorld, id: String) {
-    let server = world.server.as_ref().expect("server not running");
-    let body = json!({
-        "id": id,
-        "match": { "path_prefix": "/v1/users", "method": ["GET", "POST"] },
-        "lb": "round_robin",
-        "failover": { "enabled": true, "max_failovers": 1, "retry_on": ["connect_failure", "5xx"], "per_try_timeout_ms": 1000 },
-        "upstreams": [
-            { "url": "http://10.0.0.12:8080", "weight": 100, "priority": 0 }
-        ],
-        "policies": [
-            { "stage": "pre_route", "id": "authn", "version": "1.0.0" }
-        ]
-    });
-
-    let response = world
-        .client
-        .post(format!("{}/routes", server.base_url))
-        .json(&body)
-        .send()
-        .await
-        .expect("failed to call /routes");
-
-    world.last_status = Some(response.status().as_u16());
-    world.last_body = response.json().await.ok();
-}
-
-#[when("I create a route pointing to the upstream")]
-async fn create_route_to_upstream(world: &mut TestWorld) {
-    let server = world.server.as_ref().expect("server not running");
-    let upstream = world.upstream_addr.expect("upstream not running");
-    let body = json!({
-        "id": "users",
-        "match": { "path_prefix": "/v1/users", "method": ["GET"] },
-        "upstreams": [
-            { "url": format!("http://{upstream}") }
-        ],
-        "policies": []
-    });
-
-    let response = world
-        .client
-        .post(format!("{}/routes", server.base_url))
-        .json(&body)
-        .send()
-        .await
-        .expect("failed to call /routes");
-
-    world.last_status = Some(response.status().as_u16());
-    world.last_body = response.json().await.ok();
-}
-
 #[given("the gateway is running")]
 #[when("the gateway is started")]
 async fn start_gateway(world: &mut TestWorld) {
@@ -189,18 +113,40 @@ async fn start_gateway(world: &mut TestWorld) {
     }
 }
 
-#[when("I list routes")]
-async fn list_routes(world: &mut TestWorld) {
-    let server = world.server.as_ref().expect("server not running");
-    let response = world
-        .client
-        .get(format!("{}/routes", server.base_url))
-        .send()
-        .await
-        .expect("failed to call /routes");
+#[when(expr = "I {word} {string} on the control plane")]
+async fn request_on_control_plane(world: &mut TestWorld, method: String, path: String) {
+    let base = control_plane_base(world);
+    send_request(world, &base, &method, &path, None).await;
+}
 
-    world.last_status = Some(response.status().as_u16());
-    world.last_body = response.json().await.ok();
+#[when(expr = "I {word} {string} on the control plane with JSON:")]
+async fn request_on_control_plane_with_json(
+    world: &mut TestWorld,
+    method: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let base = control_plane_base(world);
+    let body = json_from_docstring(world, step);
+    send_request(world, &base, &method, &path, Some(body)).await;
+}
+
+#[when(expr = "I {word} {string} on the gateway")]
+async fn request_on_gateway(world: &mut TestWorld, method: String, path: String) {
+    let base = gateway_base(world);
+    send_request(world, &base, &method, &path, None).await;
+}
+
+#[when(expr = "I {word} {string} on the gateway with JSON:")]
+async fn request_on_gateway_with_json(
+    world: &mut TestWorld,
+    method: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let base = gateway_base(world);
+    let body = json_from_docstring(world, step);
+    send_request(world, &base, &method, &path, Some(body)).await;
 }
 
 #[when(expr = "I wait for the route {string} to be available")]
@@ -235,49 +181,53 @@ async fn wait_for_route(world: &mut TestWorld, path: String) {
     );
 }
 
-#[then(expr = "a request to {string} should return {string}")]
-async fn request_should_return(world: &mut TestWorld, path: String, expected: String) {
-    let bind = world.dp_bind.clone().expect("gateway not started");
-    let url = format!("http://{bind}{path}");
-    let response = world
-        .client
-        .get(&url)
-        .send()
-        .await
-        .expect("failed to call gateway");
-
-    let status = response.status().as_u16();
-    let text = response.text().await.unwrap_or_default();
-    world.last_text = Some(text.clone());
-    let log_hint = world
-        .log_path
-        .as_ref()
-        .map(|path| format!(" (logs: {path})"))
-        .unwrap_or_default();
-    assert_eq!(
-        status,
-        200,
-        "expected 200, got {status} with body {text}{log_hint}"
-    );
-    assert_eq!(text, expected, "unexpected response body");
-}
-
 #[then(expr = "the response status should be {int}")]
 async fn assert_status(world: &mut TestWorld, status: u16) {
     let actual = world.last_status.unwrap_or_default();
     assert_eq!(actual, status, "expected status {status}, got {actual}");
 }
 
-#[then(expr = "the response should include route {string}")]
-async fn assert_route_present(world: &mut TestWorld, route_id: String) {
-    let body = world.last_body.clone().expect("no response body");
-    let routes = body.as_array().expect("expected array response");
+#[then(expr = "the response text should be {string}")]
+async fn assert_text(world: &mut TestWorld, expected: String) {
+    let text = world.last_text.clone().unwrap_or_default();
+    assert_eq!(text, expected, "unexpected response body");
+}
 
-    let found = routes.iter().any(|route| {
-        route.get("id").and_then(|id| id.as_str()) == Some(route_id.as_str())
-    });
+#[then("the JSON response should include:")]
+async fn assert_json_includes(world: &mut TestWorld, #[step] step: &Step) {
+    let expected = json_from_docstring(world, step);
+    let actual = world
+        .last_body
+        .clone()
+        .or_else(|| {
+            world
+                .last_text
+                .as_ref()
+                .and_then(|text| serde_json::from_str(text).ok())
+        })
+        .expect("no JSON response captured");
 
-    assert!(found, "route {route_id} not found in response");
+    assert!(
+        json_contains(&actual, &expected),
+        "expected JSON to include {expected}, got {actual}"
+    );
+}
+
+#[then("the JSON response should equal:")]
+async fn assert_json_equals(world: &mut TestWorld, #[step] step: &Step) {
+    let expected = json_from_docstring(world, step);
+    let actual = world
+        .last_body
+        .clone()
+        .or_else(|| {
+            world
+                .last_text
+                .as_ref()
+                .and_then(|text| serde_json::from_str(text).ok())
+        })
+        .expect("no JSON response captured");
+
+    assert_eq!(actual, expected, "unexpected JSON response");
 }
 
 #[tokio::main]
@@ -323,4 +273,93 @@ fn init_test_logging() -> String {
 
     std::env::set_var("GATEWAY_LOG_PATH", path.to_string_lossy().to_string());
     path.to_string_lossy().to_string()
+}
+
+fn control_plane_base(world: &TestWorld) -> String {
+    world
+        .server
+        .as_ref()
+        .expect("control plane not running")
+        .base_url
+        .clone()
+}
+
+fn gateway_base(world: &TestWorld) -> String {
+    let bind = world.dp_bind.clone().expect("gateway not started");
+    format!("http://{bind}")
+}
+
+async fn send_request(
+    world: &mut TestWorld,
+    base_url: &str,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) {
+    let url = format!("{base_url}{path}");
+    let method = Method::from_bytes(method.to_uppercase().as_bytes())
+        .unwrap_or_else(|_| panic!("invalid HTTP method: {method}"));
+    let mut request = world.client.request(method, &url);
+    if let Some(json_body) = body {
+        request = request.json(&json_body);
+    }
+
+    let response = request.send().await.expect("request failed");
+    let status = response.status().as_u16();
+    let text = response.text().await.unwrap_or_default();
+    world.last_status = Some(status);
+    world.last_text = Some(text.clone());
+    world.last_body = serde_json::from_str(&text).ok();
+}
+
+fn json_from_docstring(world: &TestWorld, step: &Step) -> serde_json::Value {
+    let raw = step
+        .docstring
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| panic!("step is missing a JSON docstring: {}", step.value));
+    let rendered = render_docstring(world, raw);
+    serde_json::from_str(&rendered)
+        .unwrap_or_else(|err| panic!("invalid JSON docstring: {err}\n{rendered}"))
+}
+
+fn render_docstring(world: &TestWorld, raw: &str) -> String {
+    let mut rendered = raw.to_string();
+    if let Some(upstream) = world.upstream_addr {
+        rendered = rendered.replace("{{upstream}}", &upstream.to_string());
+        rendered = rendered.replace("{{upstream_url}}", &format!("http://{upstream}"));
+    }
+    if let Some(server) = world.server.as_ref() {
+        rendered = rendered.replace("{{control_plane}}", &server.base_url);
+        rendered = rendered.replace("{{control_plane_grpc}}", &server.grpc_url);
+    }
+    if let Some(bind) = world.dp_bind.as_ref() {
+        rendered = rendered.replace("{{gateway}}", &format!("http://{bind}"));
+    }
+    rendered
+}
+
+fn json_contains(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    match (actual, expected) {
+        (serde_json::Value::Array(actual_arr), serde_json::Value::Object(_)) => {
+            actual_arr.iter().any(|item| json_contains(item, expected))
+        }
+        (serde_json::Value::Array(actual_arr), serde_json::Value::Array(expected_arr)) => {
+            expected_arr.iter().all(|expected_item| {
+                actual_arr
+                    .iter()
+                    .any(|actual_item| json_contains(actual_item, expected_item))
+            })
+        }
+        (serde_json::Value::Object(actual_obj), serde_json::Value::Object(expected_obj)) => {
+            expected_obj.iter().all(|(key, expected_val)| {
+                actual_obj
+                    .get(key)
+                    .map(|actual_val| json_contains(actual_val, expected_val))
+                    .unwrap_or(false)
+            })
+        }
+        _ => actual == expected,
+    }
 }
