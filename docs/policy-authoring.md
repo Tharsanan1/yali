@@ -1,110 +1,115 @@
 # Custom Policy Authoring and Testing
 
-This guide explains how to add a custom policy in the current gateway codebase and validate it end to end.
+This guide shows how to build, register, and verify a custom policy in the current gateway.
 
-## Current Runtime Model
+## Runtime Contract (Current)
 
-Today, the control plane and data plane behave as follows:
+- Control plane validates policy metadata and configuration with JSON Schema.
+- Route policy `params` are merged with policy `default_config` in CP.
+- CP publishes `effective_config_json` in gRPC snapshots.
+- DP preloads policy artifacts (`wasm_uri` + `sha256`) and executes policies via Wasmtime Component Model (`policy-sdk/wit/policy.wit`).
+- DP runs attached policies in route order for `pre_upstream`.
+- Fail-closed: policy load or execution errors return `500`.
 
-- Control plane (`gateway-cp`) validates policy configs with JSON Schema.
-- Routes attach policies with per-route `params`.
-- Effective config is `deep_merge(default_config, params)` and is sent to DP over gRPC.
-- Data plane (`gateway-dp`) loads policy artifacts (`wasm_uri`, `sha256`) and validates module bytes.
-- Data plane executes attached policies in route order and parses generic policy actions from effective config (`request_headers`, `request_rewrite`, `upstream_hint`, `direct_response`, `request_body_patch`, `response_headers`).
+## 1) Implement a Policy Component
 
-Important: the WIT contract exists at `policy-sdk/wit/policy.wit`, but runtime is not yet invoking guest policy code through Component Model bindings. Current execution is host-side action interpretation with fail-closed behavior.
+Create a Rust crate that exports the WIT world `pre-upstream-policy`.
 
-## 1) Define the Policy Contract
+Reference implementation:
+- `/Users/tharsanan/Documents/Projects/yali/policies/add-header/src/lib.rs`
 
-Pick a unique `(id, version)` and define:
+WIT source:
+- `/Users/tharsanan/Documents/Projects/yali/policy-sdk/wit/policy.wit`
 
-- `supported_stages` (currently only `pre_upstream` is executed in DP).
-- `config_schema` (JSON Schema).
-- `default_config` (must satisfy schema).
+Required guest export:
+- `evaluate-pre-upstream(method, path, host, headers-json, effective-config-json) -> result<policy-decision, string>`
 
-Example registration payload:
+`policy-decision` supports:
+- `request-headers`
+- `request-rewrite`
+- `upstream-hint`
+- `direct-response`
+- `request-body-patch-json`
+- `response-headers`
+
+Current DP execution support in `pre_upstream`:
+- supported now: `request-headers`, `request-rewrite`, `upstream-hint`
+- currently rejected (500): `direct-response`, `request-body-patch-json`, `response-headers`
+
+## 2) Build the WASM Artifact
+
+Build all policy artifacts:
+
+```bash
+./scripts/build-policy-artifacts.sh
+```
+
+Current output:
+- `/Users/tharsanan/Documents/Projects/yali/policies/add-header/add-header.wasm`
+
+Compute digest:
+
+```bash
+shasum -a 256 /Users/tharsanan/Documents/Projects/yali/policies/add-header/add-header.wasm
+```
+
+## 3) Register Policy in Control Plane
+
+Example `POST /policies`:
 
 ```json
 {
-  "id": "my-policy",
+  "id": "add-header",
   "version": "1.0.0",
-  "wasm_uri": "file:///absolute/path/to/my-policy.wasm",
+  "wasm_uri": "file:///Users/tharsanan/Documents/Projects/yali/policies/add-header/add-header.wasm",
   "sha256": "<sha256-hex>",
   "supported_stages": ["pre_upstream"],
   "config_schema": {
     "type": "object",
-    "required": ["message"],
+    "required": ["request_headers"],
     "properties": {
-      "message": { "type": "string" }
+      "request_headers": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["name", "value", "overwrite"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "value": { "type": "string" },
+            "overwrite": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "minItems": 1
+      }
     },
     "additionalProperties": false
   },
   "default_config": {
-    "message": "hello"
+    "request_headers": [
+      { "name": "x-policy", "value": "default", "overwrite": true }
+    ]
   }
 }
 ```
 
-## 2) Define Policy Actions in Effective Config
+## 4) Attach Policy to a Route
 
-Use `default_config` + route `params` to produce effective action payload. Supported action fields:
-
-- `request_headers`
-- `request_rewrite`
-- `upstream_hint`
-- `direct_response`
-- `request_body_patch`
-- `response_headers`
-
-Compatibility alias:
-
-- `headers` is accepted as alias of `request_headers`.
-
-If effective config cannot be parsed into valid actions, DP fails closed (request returns `500`).
-
-## 3) Provide a Policy Artifact
-
-DP requires a `wasm_uri` and `sha256` for each policy artifact in snapshots.
-
-- Supported URI schemes in runtime:
-  - `file://`
-  - `http://`
-  - `https://`
-- `oci://` is planned but currently not implemented in runtime loader.
-
-Compute SHA-256:
-
-```bash
-shasum -a 256 /absolute/path/to/my-policy.wasm
-```
-
-Use that digest in policy registration.
-
-## 4) Register Policy and Attach to a Route
-
-Register policy:
-
-```bash
-curl -s -X POST http://127.0.0.1:8081/policies \
-  -H 'Content-Type: application/json' \
-  -d @policy.json
-```
-
-Attach to route (`params` overrides `default_config`):
+Example route payload with policy params:
 
 ```json
 {
-  "id": "route-with-my-policy",
+  "id": "route-with-policy",
   "match": { "path_prefix": "/v1/test", "method": ["GET"] },
   "upstreams": [{ "url": "http://127.0.0.1:18085" }],
   "policies": [
     {
       "stage": "pre_upstream",
-      "id": "my-policy",
+      "id": "add-header",
       "version": "1.0.0",
       "params": {
         "request_headers": [
-          { "name": "x-my-policy", "value": "applied", "overwrite": true }
+          { "name": "x-policy", "value": "override", "overwrite": true }
         ]
       }
     }
@@ -112,27 +117,18 @@ Attach to route (`params` overrides `default_config`):
 }
 ```
 
-## 5) Test with Cucumber
+CP computes:
+- `effective_config = deep_merge(default_config, params)`
 
-Add a feature file under `gateway-it/features/`, following `gateway-it/features/policy_add_header.feature`.
+## 5) Test a Policy End to End
 
-Use placeholders supported by test world:
-
-- `{{policy_add_header_wasm_uri}}`
-- `{{policy_add_header_sha256}}`
-- `{{upstream_url}}`
-- `{{control_plane}}`
-- `{{gateway}}`
-
-For a new custom policy, add equivalent placeholders in `gateway-it/tests/cucumber.rs` if needed.
-
-### Process-based integration test
+### Process mode (fastest for local iteration)
 
 ```bash
 make it-local
 ```
 
-Or split flow:
+Or split:
 
 ```bash
 make it-local-up
@@ -140,35 +136,47 @@ make it-local-test
 make it-local-down
 ```
 
-### Docker-based integration test
+### Docker mode
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.it.yml build
 docker compose -f docker-compose.yml -f docker-compose.it.yml run --rm gateway-it
 ```
 
-## 6) Recommended Test Scenarios
+## 6) Add Cucumber Coverage for New Policies
 
-- Valid policy registration (`201`).
-- Invalid schema/default config (`422`).
-- Route attach with valid params (`201`).
-- Route attach with invalid params (`422`).
-- Positive request path shows policy effect at upstream.
-- Missing/unsupported executor returns `500` (fail-closed).
+Add feature files under:
+- `/Users/tharsanan/Documents/Projects/yali/gateway-it/features`
+
+Existing policy example:
+- `/Users/tharsanan/Documents/Projects/yali/gateway-it/features/policy_add_header.feature`
+
+Available placeholders in test docstrings:
+- `{{policy_add_header_wasm_uri}}`
+- `{{policy_add_header_sha256}}`
+- `{{upstream_url}}`
+- `{{control_plane}}`
+- `{{gateway}}`
+
+If you introduce additional artifacts, add equivalent placeholders in:
+- `/Users/tharsanan/Documents/Projects/yali/gateway-it/tests/cucumber.rs`
+
+## 7) URI Support Notes
+
+DP loader currently supports:
+- `file://`
+- `http://`
+- `https://`
+
+`oci://` is not implemented yet in `policy-runtime` and currently fails preload.
 
 ## Troubleshooting
 
-- Snapshot not applying in DP:
-  - Check `target/it-local/logs/gateway-dp.log` for `cp sync error`.
-  - Most common cause: invalid `wasm_uri` path or SHA mismatch.
-- Route exists in CP but no match in DP:
-  - If snapshot preload fails, DP keeps previous active snapshot.
-  - Fix policy artifact issue first, then republish route/policy.
-
-## Forward Path (Component Model Execution)
-
-When runtime is switched to true WIT/Component execution:
-
-- Keep CP contract (`config_schema`, `default_config`, route `params`) unchanged.
-- Move policy-specific logic from host match branches into Wasm component implementations.
-- Keep cucumber coverage unchanged except artifact/tooling setup.
+- Policy snapshot fails to apply:
+  - Check `/Users/tharsanan/Documents/Projects/yali/target/it-local/logs/gateway-dp.log`
+  - Typical causes: SHA mismatch, bad URI, guest instantiation failure.
+- Route is present in CP but behavior not visible in DP:
+  - DP keeps previous snapshot if new snapshot preload fails.
+  - Fix preload issue and republish route/policy.
+- Request returns `500` after policy attach:
+  - Check for unsupported decision actions in `pre_upstream` (see runtime support section).
