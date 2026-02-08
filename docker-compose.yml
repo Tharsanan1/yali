@@ -1,0 +1,33 @@
+services:
+  gateway-cp:
+    build:
+      context: .
+      dockerfile: gateway-cp/Dockerfile
+    ports:
+      - "8081:8081"
+      - "9090:9090"
+    environment:
+      - GATEWAY_CP_CONFIG=/app/config/control-plane.example.toml
+      - GATEWAY_CP__database_url=sqlite:///var/lib/gateway/control-plane.db
+      - RUST_LOG=info
+    volumes:
+      - ./config:/app/config
+      - gateway-cp-data:/var/lib/gateway
+
+  gateway-dp:
+    build:
+      context: .
+      dockerfile: gateway-dp/Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      - gateway-cp
+    environment:
+      - GATEWAY_DP_CONFIG=/app/config/gateway.example.toml
+      - GATEWAY_DP__control_plane__grpc_endpoint=http://gateway-cp:9090
+      - RUST_LOG=info
+    volumes:
+      - ./config:/app/config
+
+volumes:
+  gateway-cp-data:
