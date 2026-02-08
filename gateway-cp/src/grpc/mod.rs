@@ -23,7 +23,10 @@ pub struct ConfigState {
 
 impl ConfigState {
     pub fn new() -> Self {
-        let snapshot = Snapshot { version: 0, routes: Vec::new() };
+        let snapshot = Snapshot {
+            version: 0,
+            routes: Vec::new(),
+        };
         let (tx, _) = watch::channel(snapshot);
         Self {
             version: Arc::new(AtomicU64::new(0)),
@@ -32,13 +35,19 @@ impl ConfigState {
     }
 
     pub fn server(self: &Arc<Self>) -> ConfigServiceServer<ConfigServiceImpl> {
-        ConfigServiceServer::new(ConfigServiceImpl { state: self.clone() })
+        ConfigServiceServer::new(ConfigServiceImpl {
+            state: self.clone(),
+        })
     }
 
     pub async fn publish_from_db(&self, pool: &SqlitePool) -> Result<(), sqlx::Error> {
         let routes = crate::db::list_routes(pool).await?;
         let snapshot = self.build_snapshot(routes);
-        debug!(version = snapshot.version, routes = snapshot.routes.len(), "published config snapshot");
+        debug!(
+            version = snapshot.version,
+            routes = snapshot.routes.len(),
+            "published config snapshot"
+        );
         let _ = self.tx.send(snapshot);
         Ok(())
     }
@@ -82,7 +91,11 @@ fn route_to_proto(route: RouteSpec) -> Route {
     let (path_prefix, methods, host) = parse_match(route.match_rules);
     Route {
         id: route.id,
-        r#match: Some(Match { path_prefix, methods, host }),
+        r#match: Some(Match {
+            path_prefix,
+            methods,
+            host,
+        }),
         upstreams: route.upstreams.into_iter().map(upstream_to_proto).collect(),
         lb: route.lb.unwrap_or_default(),
         policies: route.policies.into_iter().map(policy_to_proto).collect(),

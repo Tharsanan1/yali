@@ -1,13 +1,26 @@
 use serde::{Deserialize, Serialize};
 
+fn default_supported_stages() -> Vec<String> {
+    vec![
+        "pre_route".to_string(),
+        "pre_upstream".to_string(),
+        "post_response".to_string(),
+    ]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicySpec {
     pub id: String,
     pub version: String,
     pub wasm_uri: String,
     pub sha256: String,
-    #[serde(default)]
-    pub config: serde_json::Value,
+    #[serde(default = "default_supported_stages")]
+    pub supported_stages: Vec<String>,
+    #[serde(default = "default_config_schema")]
+    pub config_schema: serde_json::Value,
+    #[serde(default = "default_policy_config")]
+    #[serde(alias = "config")]
+    pub default_config: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,4 +90,16 @@ pub struct RoutePolicy {
     pub stage: String, // pre_route | pre_upstream | post_response
     pub id: String,
     pub version: String,
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
+}
+
+fn default_config_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object"
+    })
+}
+
+fn default_policy_config() -> serde_json::Value {
+    serde_json::json!({})
 }

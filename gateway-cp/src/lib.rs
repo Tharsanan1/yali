@@ -3,15 +3,16 @@ pub mod config;
 pub mod db;
 pub mod grpc;
 pub mod model;
+pub mod service;
 
 use api::AppState;
 use config::GatewayCpConfig;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tonic::transport::Server as GrpcServer;
 use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt};
 use tracing_subscriber::Layer;
-use tonic::transport::Server as GrpcServer;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 pub struct RunningServer {
     pub base_url: String,
@@ -39,7 +40,9 @@ pub async fn run(config: GatewayCpConfig) -> Result<(), Box<dyn std::error::Erro
         let server = grpc_state.server();
         GrpcServer::builder()
             .add_service(server)
-            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(grpc_listener))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
+                grpc_listener,
+            ))
             .await
     });
 
@@ -53,7 +56,10 @@ pub async fn start_for_test() -> Result<RunningServer, Box<dyn std::error::Error
     let config = GatewayCpConfig {
         bind: "127.0.0.1:0".to_string(),
         grpc_bind: "127.0.0.1:0".to_string(),
-        logging: config::LoggingConfig { level: "info".to_string(), json: true },
+        logging: config::LoggingConfig {
+            level: "info".to_string(),
+            json: true,
+        },
         database_url: format!("sqlite://target/gateway-cp-test-{db_suffix}.db"),
     };
 
@@ -79,7 +85,9 @@ pub async fn start_for_test() -> Result<RunningServer, Box<dyn std::error::Error
         let server = grpc_state.server();
         GrpcServer::builder()
             .add_service(server)
-            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(grpc_listener))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
+                grpc_listener,
+            ))
             .await
     });
 
@@ -141,7 +149,10 @@ pub async fn build_state_and_listener(
     Ok((listener, AppState { pool, config_state }))
 }
 
-pub async fn serve(listener: TcpListener, state: AppState) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn serve(
+    listener: TcpListener,
+    state: AppState,
+) -> Result<(), Box<dyn std::error::Error>> {
     let app = api::router(state);
     let addr: SocketAddr = listener.local_addr()?;
     tracing::info!(bind = %addr, "gateway-cp listening");
@@ -168,7 +179,11 @@ fn init_logging(level: &str, json: bool) {
     };
 
     let fmt_layer = if json {
-        fmt::layer().json().with_target(true).with_writer(writer).boxed()
+        fmt::layer()
+            .json()
+            .with_target(true)
+            .with_writer(writer)
+            .boxed()
     } else {
         fmt::layer().with_target(true).with_writer(writer).boxed()
     };
@@ -216,7 +231,10 @@ fn ensure_sqlite_path(url: &str) -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
 
-    std::fs::OpenOptions::new().create(true).write(true).open(file_path)?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(file_path)?;
 
     Ok(())
 }
