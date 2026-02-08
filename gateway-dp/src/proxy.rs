@@ -33,11 +33,20 @@ impl ProxyHttp for GatewayProxy {
         session: &mut Session,
         _ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let path = session.req_header().uri.path().to_string();
+        let request = session.req_header();
+        let path = request.uri.path().to_string();
+        let method = request.method.as_str().to_string();
+        let host = request
+            .headers
+            .get("host")
+            .and_then(|value| value.to_str().ok())
+            .map(ToString::to_string);
         let snapshot = self.state.snapshot();
 
-        let route = router::match_route(&snapshot, &path).cloned().ok_or_else(|| {
-            warn!(path = %path, routes = snapshot.routes.len(), "no route match");
+        let route = router::match_route(&snapshot, &path, &method, host.as_deref())
+            .cloned()
+            .ok_or_else(|| {
+            warn!(path = %path, method = %method, host = host.as_deref().unwrap_or(""), routes = snapshot.routes.len(), "no route match");
             Error::new(ErrorType::Custom("no route"))
         })?;
         let upstream = router::select_upstream(&route).ok_or_else(|| {
@@ -48,6 +57,8 @@ impl ProxyHttp for GatewayProxy {
         let peer = build_peer(&upstream)?;
         debug!(
             path = %path,
+            method = %method,
+            host = host.as_deref().unwrap_or(""),
             route_id = %route.id,
             upstream = %upstream.url,
             "proxying request"

@@ -69,6 +69,15 @@ fn snapshot_to_routes(snapshot: Snapshot) -> RouteSnapshot {
                 .r#match
                 .as_ref()
                 .and_then(|m| if m.path_prefix.is_empty() { None } else { Some(m.path_prefix.clone()) });
+            let methods = route
+                .r#match
+                .as_ref()
+                .map(|m| m.methods.clone())
+                .unwrap_or_default();
+            let host = route
+                .r#match
+                .as_ref()
+                .and_then(|m| if m.host.is_empty() { None } else { Some(m.host.clone()) });
 
             let upstreams = route
                 .upstreams
@@ -76,7 +85,7 @@ fn snapshot_to_routes(snapshot: Snapshot) -> RouteSnapshot {
                 .map(|u| Upstream { url: u.url })
                 .collect();
 
-            Route::new(route.id, path_prefix, upstreams)
+            Route::new(route.id, path_prefix, methods, host, upstreams)
         })
         .collect();
 
