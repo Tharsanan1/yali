@@ -1,0 +1,22 @@
+services:
+  upstream:
+    image: hashicorp/http-echo:0.2.3
+    command: ["-listen", ":8085", "-text", "upstream-ok"]
+    ports:
+      - "18080:8085"
+
+  gateway-it:
+    build:
+      context: .
+      dockerfile: gateway-it/Dockerfile
+    depends_on:
+      - gateway-cp
+      - gateway-dp
+      - upstream
+    environment:
+      - GATEWAY_IT_CP_BASE_URL=http://gateway-cp:8081
+      - GATEWAY_IT_DP_BASE_URL=http://gateway-dp:8080
+      - GATEWAY_IT_UPSTREAM_URL=http://upstream:8085
+      - GATEWAY_IT_UPSTREAM_CHECK_URL=http://upstream:8085
+      - RUST_LOG=debug
+    command: ["cargo", "test", "-p", "gateway-it"]

@@ -1,26 +1,28 @@
-FROM rust:1.75-bookworm AS builder
+# syntax=docker/dockerfile:1.7-labs
+FROM rust:bookworm AS chef
 
 WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        cmake \
         pkg-config \
         libssl-dev \
+    && cargo install cargo-chef --locked \
     && rm -rf /var/lib/apt/lists/*
 
-COPY Cargo.toml Cargo.lock ./
-COPY gateway-cp/Cargo.toml gateway-cp/Cargo.toml
-COPY gateway-dp/Cargo.toml gateway-dp/Cargo.toml
-COPY gateway-proto/Cargo.toml gateway-proto/Cargo.toml
-COPY policy-runtime/Cargo.toml policy-runtime/Cargo.toml
-COPY policy-sdk/Cargo.toml policy-sdk/Cargo.toml
-COPY gateway-it/Cargo.toml gateway-it/Cargo.toml
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
 
-COPY gateway-cp/src gateway-cp/src
-COPY gateway-proto gateway-proto
-COPY config config
+FROM chef AS cacher
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
 
-RUN cargo build -p gateway-cp --release
+FROM chef AS builder
+COPY . .
+COPY --from=cacher /app/target /app/target
+RUN cargo build --release -p gateway-cp --locked
 
 FROM debian:bookworm-slim
 

@@ -17,28 +17,11 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS cacher
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN cargo chef cook --recipe-path recipe.json
 
 FROM chef AS builder
 COPY . .
 COPY --from=cacher /app/target /app/target
-RUN cargo build --release -p gateway-dp --locked
+RUN cargo test -p gateway-it --no-run --locked
 
-FROM debian:bookworm-slim
-
-WORKDIR /app
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        libssl3 \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /app/target/release/gateway-dp /usr/local/bin/gateway-dp
-COPY config /app/config
-
-ENV GATEWAY_DP_CONFIG=/app/config/gateway.example.toml
-
-EXPOSE 8080
-
-CMD ["/usr/local/bin/gateway-dp"]
+CMD ["cargo", "test", "-p", "gateway-it"]

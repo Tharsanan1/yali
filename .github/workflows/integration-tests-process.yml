@@ -1,0 +1,46 @@
+name: Integration Tests (Process)
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: integration-tests-process-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cucumber-process:
+    name: Cucumber Integration Tests (Process)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake pkg-config libssl-dev
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run process-based integration tests
+        run: make it-local
+
+      - name: Capture process logs
+        if: failure()
+        run: |
+          mkdir -p artifacts
+          if [ -d target/it-local/logs ]; then
+            cp -R target/it-local/logs artifacts/it-local-logs
+          fi
+
+      - name: Upload process logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: it-local-logs
+          path: artifacts/it-local-logs

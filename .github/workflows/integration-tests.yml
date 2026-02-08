@@ -1,36 +1,37 @@
-name: Integration Tests
+name: Integration Tests (Docker)
 
 on:
   pull_request:
   workflow_dispatch:
 
 concurrency:
-  group: integration-tests-${{ github.ref }}
+  group: integration-tests-docker-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   cucumber:
     name: Cucumber Integration Tests
     runs-on: ubuntu-latest
+    env:
+      DOCKER_BUILDKIT: "1"
+      COMPOSE_DOCKER_CLI_BUILD: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+      - name: Build integration stack
+        run: docker compose -f docker-compose.yml -f docker-compose.it.yml build
 
       - name: Run integration tests
-        env:
-          RUST_LOG: debug
-        run: cargo test -p gateway-it
+        run: docker compose -f docker-compose.yml -f docker-compose.it.yml run --rm gateway-it
+
+      - name: Capture docker compose logs
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.it.yml logs --no-color > docker-compose.log
+
+      - name: Upload docker logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-compose-logs
+          path: docker-compose.log

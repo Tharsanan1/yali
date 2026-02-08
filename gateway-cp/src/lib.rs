@@ -32,13 +32,14 @@ impl RunningServer {
 pub async fn run(config: GatewayCpConfig) -> Result<(), Box<dyn std::error::Error>> {
     let (listener, state) = build_state_and_listener(&config, Some(config.bind.as_str())).await?;
     let grpc_addr: SocketAddr = config.grpc_bind.parse()?;
+    let grpc_listener = TcpListener::bind(grpc_addr).await?;
     let grpc_state = state.config_state.clone();
 
     let grpc = tokio::spawn(async move {
         let server = grpc_state.server();
         GrpcServer::builder()
             .add_service(server)
-            .serve(grpc_addr)
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(grpc_listener))
             .await
     });
 

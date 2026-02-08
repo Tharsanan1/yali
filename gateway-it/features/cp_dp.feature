@@ -7,8 +7,8 @@ Feature: Control plane to data plane routing
     When I POST "/routes" on the control plane with JSON:
       """
       {
-        "id": "users",
-        "match": { "path_prefix": "/v1/users", "method": ["GET"] },
+        "id": "users-dp",
+        "match": { "path_prefix": "/v1/dp-users", "method": ["GET"] },
         "upstreams": [
           { "url": "{{upstream_url}}" }
         ],
@@ -16,7 +16,7 @@ Feature: Control plane to data plane routing
       }
       """
     Then the response status should be 201
-    When I wait for the route "/v1/users" to be available
-    When I GET "/v1/users" on the gateway
+    When I wait for the route "/v1/dp-users" to be available
+    When I GET "/v1/dp-users" on the gateway
     Then the response status should be 200
     And the response text should be "upstream-ok"

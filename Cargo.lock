@@ -1159,17 +1159,10 @@ name = "gateway-it"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
- "axum 0.7.9",
  "cucumber",
- "gateway-cp",
- "gateway-dp",
- "gateway-proto",
  "reqwest",
  "serde_json",
- "thiserror 1.0.69",
  "tokio",
- "tonic",
 ]
 
 [[package]]

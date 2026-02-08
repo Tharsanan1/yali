@@ -1,26 +1,19 @@
-use axum::{routing::get, Router};
 use cucumber::gherkin::Step;
 use cucumber::{given, then, when, World};
-use gateway_cp::RunningServer;
-use gateway_dp::GatewayDpConfig;
 use reqwest::Method;
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::thread;
 use std::time::Duration;
-use std::{path::PathBuf, time::SystemTime};
 
 #[derive(Default, World)]
 #[world(init = Self::new)]
 struct TestWorld {
-    server: Option<RunningServer>,
-    upstream_addr: Option<SocketAddr>,
-    dp_bind: Option<String>,
-    dp_handle: Option<thread::JoinHandle<()>>,
+    cp_base: String,
+    dp_base: String,
+    upstream_url: String,
+    upstream_check_url: Option<String>,
     client: reqwest::Client,
     last_status: Option<u16>,
     last_body: Option<serde_json::Value>,
     last_text: Option<String>,
-    log_path: Option<String>,
 }
 
 impl std::fmt::Debug for TestWorld {
@@ -34,89 +27,52 @@ impl std::fmt::Debug for TestWorld {
 
 impl TestWorld {
     async fn new() -> Result<Self, anyhow::Error> {
-        let log_path = init_test_logging();
+        let cp_base = std::env::var("GATEWAY_IT_CP_BASE_URL")
+            .map_err(|_| anyhow::anyhow!("GATEWAY_IT_CP_BASE_URL is required"))?;
+        let dp_base = std::env::var("GATEWAY_IT_DP_BASE_URL")
+            .map_err(|_| anyhow::anyhow!("GATEWAY_IT_DP_BASE_URL is required"))?;
+        let upstream_url = std::env::var("GATEWAY_IT_UPSTREAM_URL")
+            .map_err(|_| anyhow::anyhow!("GATEWAY_IT_UPSTREAM_URL is required"))?;
+        let upstream_check_url = std::env::var("GATEWAY_IT_UPSTREAM_CHECK_URL").ok();
+
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(1000))
+            .timeout(Duration::from_millis(3000))
             .build()?;
-        Ok(Self { client, log_path: Some(log_path), ..Self::default() })
+
+        Ok(Self {
+            cp_base,
+            dp_base,
+            upstream_url,
+            upstream_check_url,
+            client,
+            ..Self::default()
+        })
     }
 }
 
 #[given("the control plane is running")]
 async fn control_plane_running(world: &mut TestWorld) {
-    if world.server.is_some() {
-        return;
-    }
+    let url = format!("{}/health", world.cp_base);
+    wait_for_http_ok(&world.client, &url, Duration::from_secs(10)).await;
+}
 
-    let server = gateway_cp::start_for_test()
-        .await
-        .expect("failed to start control plane");
-    world.server = Some(server);
+#[given("the gateway is running")]
+async fn gateway_running(world: &mut TestWorld) {
+    let url = format!("{}", world.dp_base);
+    wait_for_http_ready(&world.client, &url, Duration::from_secs(10)).await;
 }
 
 #[given("an upstream service is running")]
 async fn upstream_running(world: &mut TestWorld) {
-    if world.upstream_addr.is_some() {
-        return;
-    }
-
-    let app = Router::new().route("/v1/users", get(|| async { "upstream-ok" }));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind upstream");
-    let addr = listener.local_addr().expect("upstream addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    wait_for_tcp(&addr.to_string(), Duration::from_secs(5));
-    world.upstream_addr = Some(addr);
-}
-
-#[given("the gateway is running")]
-#[when("the gateway is started")]
-async fn start_gateway(world: &mut TestWorld) {
-    if world.dp_bind.is_some() {
-        return;
-    }
-    let server = world.server.as_ref().expect("server not running");
-    let port = pick_port();
-    let bind = format!("127.0.0.1:{port}");
-
-    let dp_config = GatewayDpConfig {
-        listener: gateway_dp::config::ListenerConfig { bind: bind.clone(), tls: None },
-        control_plane: gateway_dp::config::ControlPlaneConfig {
-            grpc_endpoint: server.grpc_url.clone(),
-            tls: None,
-        },
-        logging: gateway_dp::config::LoggingConfig {
-            level: "info".to_string(),
-            json: true,
-            rolling_file: None,
-        },
-        limits: gateway_dp::config::LimitsConfig {
-            max_body_bytes: 10 * 1024 * 1024,
-            pre_upstream_body_bytes: 64 * 1024,
-        },
-    };
-
-    let handle = thread::spawn(move || {
-        gateway_dp::run(dp_config);
-    });
-
-    world.dp_bind = Some(bind);
-    world.dp_handle = Some(handle);
-    wait_for_tcp(&world.dp_bind.clone().unwrap(), Duration::from_secs(5));
-    if let Some(handle) = world.dp_handle.as_ref() {
-        if handle.is_finished() {
-            panic!("gateway thread exited unexpectedly");
-        }
+    if let Some(check) = &world.upstream_check_url {
+        wait_for_http_ok(&world.client, check, Duration::from_secs(10)).await;
     }
 }
 
 #[when(expr = "I {word} {string} on the control plane")]
 async fn request_on_control_plane(world: &mut TestWorld, method: String, path: String) {
-    let base = control_plane_base(world);
-    send_request(world, &base, &method, &path, None).await;
+    let cp_base = world.cp_base.clone();
+    send_request(world, &cp_base, &method, &path, None).await;
 }
 
 #[when(expr = "I {word} {string} on the control plane with JSON:")]
@@ -126,15 +82,15 @@ async fn request_on_control_plane_with_json(
     path: String,
     #[step] step: &Step,
 ) {
-    let base = control_plane_base(world);
     let body = json_from_docstring(world, step);
-    send_request(world, &base, &method, &path, Some(body)).await;
+    let cp_base = world.cp_base.clone();
+    send_request(world, &cp_base, &method, &path, Some(body)).await;
 }
 
 #[when(expr = "I {word} {string} on the gateway")]
 async fn request_on_gateway(world: &mut TestWorld, method: String, path: String) {
-    let base = gateway_base(world);
-    send_request(world, &base, &method, &path, None).await;
+    let dp_base = world.dp_base.clone();
+    send_request(world, &dp_base, &method, &path, None).await;
 }
 
 #[when(expr = "I {word} {string} on the gateway with JSON:")]
@@ -144,41 +100,15 @@ async fn request_on_gateway_with_json(
     path: String,
     #[step] step: &Step,
 ) {
-    let base = gateway_base(world);
     let body = json_from_docstring(world, step);
-    send_request(world, &base, &method, &path, Some(body)).await;
+    let dp_base = world.dp_base.clone();
+    send_request(world, &dp_base, &method, &path, Some(body)).await;
 }
 
 #[when(expr = "I wait for the route {string} to be available")]
 async fn wait_for_route(world: &mut TestWorld, path: String) {
-    let bind = world.dp_bind.clone().expect("gateway not started");
-    let url = format!("http://{bind}{path}");
-    let mut last_status = 0;
-    let mut last_err = String::new();
-
-    for _ in 0..30 {
-        match world.client.get(&url).send().await {
-            Ok(resp) => {
-                last_status = resp.status().as_u16();
-                if last_status == 200 {
-                    return;
-                }
-            }
-            Err(err) => {
-                last_err = format!("{err:?}");
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-
-    let log_hint = world
-        .log_path
-        .as_ref()
-        .map(|path| format!(" (logs: {path})"))
-        .unwrap_or_default();
-    panic!(
-        "route did not become available, last status {last_status}, last error {last_err}{log_hint}"
-    );
+    let url = format!("{}{}", world.dp_base, path);
+    wait_for_http_ok(&world.client, &url, Duration::from_secs(30)).await;
 }
 
 #[then(expr = "the response status should be {int}")]
@@ -235,60 +165,6 @@ async fn main() {
     TestWorld::run("./features").await;
 }
 
-fn pick_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    listener.local_addr().unwrap().port()
-}
-
-fn wait_for_tcp(bind: &str, timeout: Duration) {
-    let addr = bind.parse::<SocketAddr>().expect("parse bind");
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        if TcpStream::connect(addr).is_ok() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    panic!("gateway did not start listening on {bind}");
-}
-
-fn init_test_logging() -> String {
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "debug");
-    }
-
-    if let Ok(existing) = std::env::var("GATEWAY_LOG_PATH") {
-        return existing;
-    }
-
-    let dir = PathBuf::from("target/test-logs");
-    let _ = std::fs::create_dir_all(&dir);
-
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let file_name = format!("gateway-it-{}-{}.log", std::process::id(), nanos);
-    let path = dir.join(file_name);
-
-    std::env::set_var("GATEWAY_LOG_PATH", path.to_string_lossy().to_string());
-    path.to_string_lossy().to_string()
-}
-
-fn control_plane_base(world: &TestWorld) -> String {
-    world
-        .server
-        .as_ref()
-        .expect("control plane not running")
-        .base_url
-        .clone()
-}
-
-fn gateway_base(world: &TestWorld) -> String {
-    let bind = world.dp_bind.clone().expect("gateway not started");
-    format!("http://{bind}")
-}
-
 async fn send_request(
     world: &mut TestWorld,
     base_url: &str,
@@ -325,19 +201,9 @@ fn json_from_docstring(world: &TestWorld, step: &Step) -> serde_json::Value {
 }
 
 fn render_docstring(world: &TestWorld, raw: &str) -> String {
-    let mut rendered = raw.to_string();
-    if let Some(upstream) = world.upstream_addr {
-        rendered = rendered.replace("{{upstream}}", &upstream.to_string());
-        rendered = rendered.replace("{{upstream_url}}", &format!("http://{upstream}"));
-    }
-    if let Some(server) = world.server.as_ref() {
-        rendered = rendered.replace("{{control_plane}}", &server.base_url);
-        rendered = rendered.replace("{{control_plane_grpc}}", &server.grpc_url);
-    }
-    if let Some(bind) = world.dp_bind.as_ref() {
-        rendered = rendered.replace("{{gateway}}", &format!("http://{bind}"));
-    }
-    rendered
+    raw.replace("{{upstream_url}}", &world.upstream_url)
+        .replace("{{control_plane}}", &world.cp_base)
+        .replace("{{gateway}}", &world.dp_base)
 }
 
 fn json_contains(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
@@ -362,4 +228,28 @@ fn json_contains(actual: &serde_json::Value, expected: &serde_json::Value) -> bo
         }
         _ => actual == expected,
     }
+}
+
+async fn wait_for_http_ok(client: &reqwest::Client, url: &str, timeout: Duration) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(resp) = client.get(url).send().await {
+            if resp.status().is_success() {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    panic!("endpoint not ready: {url}");
+}
+
+async fn wait_for_http_ready(client: &reqwest::Client, url: &str, timeout: Duration) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if client.get(url).send().await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    panic!("endpoint not reachable: {url}");
 }
